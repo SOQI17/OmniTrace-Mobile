@@ -16,6 +16,7 @@ import { AssetLabelPDF } from './components/AssetLabelPDF';
 import { AuditLogViewer } from './components/AuditLogViewer';
 import { LoginScreen } from './components/LoginScreen';
 import { auth, db } from './firebase'; // Import DB instances
+import { Html5QrcodeScanner } from 'html5-qrcode';
 import { 
   Truck, 
   Warehouse, 
@@ -207,18 +208,39 @@ const SearchableSelect = ({ options, value, onChange, placeholder }: {
     );
 };
 
-const NavButton = ({ active, onClick, icon, label, disabled }: { active: boolean; onClick: () => void; icon: React.ReactNode; label: string; disabled?: boolean }) => (
-  <button
-    onClick={onClick}
-    disabled={disabled}
-    className={`w-full flex items-center gap-3 px-4 py-3 text-sm font-medium transition-colors ${
-      active ? 'bg-indigo-50 text-indigo-700 border-r-4 border-indigo-600' : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
-    } ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
-  >
-    {icon}
-    {label}
-  </button>
-);
+// Responsive Nav Button (Handles both Sidebar and Bottom Bar styles)
+const NavButton = ({ active, onClick, icon, label, disabled, mobileMode = false }: { active: boolean; onClick: () => void; icon: React.ReactNode; label: string; disabled?: boolean; mobileMode?: boolean }) => {
+    if (mobileMode) {
+        return (
+            <button
+                onClick={onClick}
+                disabled={disabled}
+                className={`flex flex-col items-center justify-center w-full py-2 transition-colors ${
+                  active ? 'text-indigo-600' : 'text-slate-400'
+                } ${disabled ? 'opacity-30' : ''}`}
+            >
+                <div className={`${active ? 'bg-indigo-50 p-1 rounded-full' : ''}`}>
+                    {/* Fix: cast to ReactElement<any> to accept size prop */}
+                    {React.cloneElement(icon as React.ReactElement<any>, { size: 20 })}
+                </div>
+                <span className="text-[10px] font-medium mt-1 truncate max-w-full px-1">{label}</span>
+            </button>
+        );
+    }
+
+    return (
+      <button
+        onClick={onClick}
+        disabled={disabled}
+        className={`w-full flex items-center gap-3 px-4 py-3 text-sm font-medium transition-colors ${
+          active ? 'bg-indigo-50 text-indigo-700 border-r-4 border-indigo-600' : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
+        } ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+      >
+        {icon}
+        {label}
+      </button>
+    );
+};
 
 const EditableField = ({ label, name, value, disabled }: { label: string; name: string; value?: string | number; disabled?: boolean }) => (
   <div className="flex flex-col">
@@ -263,7 +285,7 @@ const StatusBadge = ({ status }: { status: AssetStatus }) => {
 
 // Componente Tarjeta KPI
 const KPICard = ({ title, value, icon: Icon, color, subtext }: { title: string; value: string | number; icon: any; color: string; subtext?: string }) => (
-    <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 flex items-start justify-between">
+    <div className="bg-white p-4 md:p-6 rounded-xl shadow-sm border border-slate-200 flex items-start justify-between">
         <div>
             <p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">{title}</p>
             <h3 className="text-2xl font-bold text-slate-800">{value}</h3>
@@ -304,6 +326,8 @@ export default function App() {
 
   // Dispatch Modal State
   const [showDispatchModal, setShowDispatchModal] = useState(false);
+  const [dispatchTargetId, setDispatchTargetId] = useState<string | null>(null); // NEW: Specific Asset dispatch
+  
   const [dispatchData, setDispatchData] = useState({
       quantity: 1,
       reason: 'Venta',
@@ -501,6 +525,56 @@ export default function App() {
     return () => window.removeEventListener('wheel', handleZoom);
   }, []);
 
+  // --- SCANNER EFFECT ---
+  useEffect(() => {
+    let scanner: Html5QrcodeScanner | null = null;
+    
+    // Only initialize if tab is SCANNER and no modal is open and we haven't scanned anything yet
+    if (activeTab === 'SCANNER' && !scannedAsset && !showDispatchModal) {
+        // Small delay to ensure DOM is ready
+        const timer = setTimeout(() => {
+            const element = document.getElementById('reader');
+            if (element) {
+                element.innerHTML = ""; // Clear
+                try {
+                    scanner = new Html5QrcodeScanner(
+                        "reader",
+                        { fps: 10, qrbox: { width: 250, height: 250 } },
+                        false
+                    );
+                    scanner.render(onScanSuccess, onScanFailure);
+                } catch (e) { console.error("Scanner Error:", e); }
+            }
+        }, 100);
+
+        function onScanSuccess(decodedText: string, decodedResult: any) {
+            try {
+                // Expecting JSON { id: "UUID", ... }
+                const data = JSON.parse(decodedText);
+                if (data.id) {
+                    const asset = assets.find(a => a.id === data.id);
+                    if (asset) {
+                        setScannedAsset(asset);
+                        scanner?.clear();
+                    } else {
+                        alert("Activo no encontrado en base de datos local.");
+                    }
+                }
+            } catch (e) {
+                console.warn("QR no válido", e);
+            }
+        }
+        function onScanFailure(error: any) {}
+
+        return () => {
+            clearTimeout(timer);
+            if (scanner) {
+                scanner.clear().catch(err => console.error(err));
+            }
+        };
+    }
+  }, [activeTab, scannedAsset, showDispatchModal, assets]);
+
   // --- FIRESTORE SUBSCRIPTION ---
   useEffect(() => {
     if (!currentUser) return;
@@ -584,7 +658,6 @@ export default function App() {
 
   // --- Handlers: Editing and Updates ---
 
-  // Handle Edit Product Details (Master Inventory) AND Stock Adjustment
   const handleEditProduct = async (e: React.FormEvent) => {
       e.preventDefault();
       if (!editingItem || !currentUser) return;
@@ -603,13 +676,8 @@ export default function App() {
           editingItem.assets.forEach(asset => {
               const updatedAsset = {
                   ...asset,
-                  metadata: {
-                      ...asset.metadata,
-                      description: newDesc,
-                      cost: newCost
-                  }
+                  metadata: { ...asset.metadata, description: newDesc, cost: newCost }
               };
-              
               const log: AuditLogEntry = {
                   id: generateUUID(),
                   asset_id: asset.id,
@@ -619,89 +687,56 @@ export default function App() {
                   new_value: { metadata: updatedAsset.metadata },
                   timestamp
               };
-
               batch.set(db.collection("assets").doc(asset.id), updatedAsset);
               batch.set(db.collection("audit_log").doc(log.id), log);
               count++;
           });
 
           // 2. Handle Stock Adjustment (Add or Remove Assets)
-          // Calculate active stock currently in memory for this item
-          const activeAssets = editingItem.assets.filter(a => 
-              a.current_status === AssetStatus.RECEIVED_WH || 
-              a.current_status === AssetStatus.QUALITY_CHECK
-          );
+          const activeAssets = editingItem.assets.filter(a => a.current_status === AssetStatus.RECEIVED_WH || a.current_status === AssetStatus.QUALITY_CHECK);
           const currentStock = activeAssets.length;
           const diff = newStock - currentStock;
 
           if (diff > 0) {
-              // INCREASE STOCK: Create new assets
-              // Use metadata from first existing asset or editingItem as base
               const baseAsset = editingItem.assets[0]; 
-              
               for (let i = 0; i < diff; i++) {
                   const newId = generateUUID();
                   const logId = generateUUID();
-                  
                   const newAsset: Asset = {
                       id: newId,
                       current_status: AssetStatus.RECEIVED_WH,
                       lifecycle_lock: false,
                       metadata: {
                           ...baseAsset.metadata,
-                          description: newDesc, // Ensure new desc/cost is used
+                          description: newDesc,
                           cost: newCost,
-                          serial_ge: `ADJ-${Date.now()}-${i}`, // Generated Serial for Adjustment
-                          cantidad: 1, // Single unit tracking
+                          serial_ge: `ADJ-${Date.now()}-${i}`,
+                          cantidad: 1,
                           fecha_solicitud: timestamp
                       },
                       logistics: { ...baseAsset.logistics, tracking_number: 'MANUAL_ADJ' },
-                      warehouse: { 
-                          aisle: 'ADJUSTMENT', 
-                          bin: 'MANUAL', 
-                          qr_hash: `ADJ-${baseAsset.metadata.pn}` 
-                      }
+                      warehouse: { aisle: 'ADJUSTMENT', bin: 'MANUAL', qr_hash: `ADJ-${baseAsset.metadata.pn}` }
                   };
-
-                  const log: AuditLogEntry = {
-                      id: logId,
-                      asset_id: newId,
-                      actor_id: currentUser.id,
-                      action: 'CREATE',
-                      prev_value: null,
-                      new_value: newAsset,
-                      timestamp
-                  };
-
+                  const log: AuditLogEntry = { id: logId, asset_id: newId, actor_id: currentUser.id, action: 'CREATE', prev_value: null, new_value: newAsset, timestamp };
                   batch.set(db.collection("assets").doc(newId), newAsset);
                   batch.set(db.collection("audit_log").doc(logId), log);
               }
           } else if (diff < 0) {
-              // DECREASE STOCK: Dispatch existing assets (Remove from stock)
               const removeCount = Math.abs(diff);
-              // We remove the oldest or arbitrary active assets. 
               const assetsToRemove = activeAssets.slice(0, removeCount);
-              
               assetsToRemove.forEach(asset => {
                   const transition = AssetLifecycleService.transitionStatus(asset, AssetStatus.DISPATCHED, currentUser);
-                  // We can add a note or modify the transition logic if needed, but standard dispatch works for "Removing from stock"
                   batch.set(db.collection("assets").doc(transition.updatedAsset.id), transition.updatedAsset);
                   batch.set(db.collection("audit_log").doc(transition.auditLog.id), transition.auditLog);
               });
           }
-
           await batch.commit();
           setEditingItem(null);
           alert(`Producto actualizado.\n- Detalles actualizados en ${count} registros.\n- Ajuste de Stock: ${diff > 0 ? '+' : ''}${diff}`);
-      } catch (err: any) {
-          showError(err.message);
-      }
+      } catch (err: any) { showError(err.message); }
   };
-
-  // ... (Existing Warehouse Handlers: handleConfirmReception, handleConfirmMovement, handleCreateNewProduct, handleImportInitialInventory) ...
-  // [Keeping these intact as they are complex logic, just re-referencing in the component body]
   
-  const handleConfirmReception = async (e: React.FormEvent) => { /* ... existing code ... */ 
+  const handleConfirmReception = async (e: React.FormEvent) => {
       e.preventDefault();
       if (!receivingAsset || !currentUser) return;
       const formData = new FormData(e.target as HTMLFormElement);
@@ -719,123 +754,74 @@ export default function App() {
       } catch (err: any) { showError(err.message); }
   };
 
-  // New Open Modal Handler
   const handleOpenDispatchModal = (e: React.FormEvent) => {
       e.preventDefault();
       if (!selectedInventoryItem) return;
+      setDispatchTargetId(null);
       setShowDispatchModal(true);
       setDispatchData(prev => ({ ...prev, quantity: 1 }));
   };
 
-  // Improved Dispatch Logic with Modal Data
+  // Improved Dispatch Logic: Handles single scanned asset or FIFO
   const handleExecuteDispatch = async () => {
     if (!selectedInventoryItem || !currentUser) return;
     const itemData = inventoryStats[selectedInventoryItem];
     if (!itemData) return;
 
-    if (dispatchData.quantity <= 0) {
-        showError("La cantidad debe ser mayor a 0.");
-        return;
-    }
-    if (dispatchData.quantity > itemData.stock) {
-        showError(`No hay suficiente stock. Disponible: ${itemData.stock}`);
-        return;
-    }
-    if (!dispatchData.reason || !dispatchData.destination || !dispatchData.employee) {
-        showError("Por favor complete todos los campos (Motivo, Destino, Empleado).");
-        return;
-    }
+    if (dispatchData.quantity <= 0) { showError("La cantidad debe ser mayor a 0."); return; }
+    if (!dispatchTargetId && dispatchData.quantity > itemData.stock) { showError(`No hay suficiente stock. Disponible: ${itemData.stock}`); return; }
+    if (!dispatchData.reason || !dispatchData.destination || !dispatchData.employee) { showError("Por favor complete todos los campos (Motivo, Destino, Empleado)."); return; }
 
     try {
         const batch = db.batch();
         let remainingToDispatch = dispatchData.quantity;
-        
-        // Find available assets (FIFOish: we take in order of array, assuming array is sorted by date/import)
-        const availableAssets = itemData.assets.filter(a => a.current_status === AssetStatus.RECEIVED_WH || a.current_status === AssetStatus.QUALITY_CHECK);
+        let availableAssets: Asset[] = [];
+
+        if (dispatchTargetId) {
+             const target = assets.find(a => a.id === dispatchTargetId);
+             if (target && (target.current_status === AssetStatus.RECEIVED_WH || target.current_status === AssetStatus.QUALITY_CHECK)) {
+                 availableAssets = [target];
+                 if (dispatchData.quantity > 1) { showError("Al despachar un activo específico, la cantidad debe ser 1."); return; }
+             } else {
+                 showError("El activo escaneado no está disponible."); return;
+             }
+        } else {
+             availableAssets = itemData.assets.filter(a => a.current_status === AssetStatus.RECEIVED_WH || a.current_status === AssetStatus.QUALITY_CHECK);
+        }
 
         for (const asset of availableAssets) {
             if (remainingToDispatch <= 0) break;
-
             const assetQty = asset.metadata.cantidad || 1;
-
             if (assetQty <= remainingToDispatch) {
-                // CASE 1: Consume entire asset
                 let updatedAsset = { ...asset };
-                
-                // Add dispatch details to warehouse metadata (using casting for flexible fields)
-                const whUpdates = {
-                    responsable_egreso: dispatchData.employee,
-                    destino_final: dispatchData.destination,
-                    motivo_salida: dispatchData.reason
-                } as any;
-
+                const whUpdates = { responsable_egreso: dispatchData.employee, destino_final: dispatchData.destination, motivo_salida: dispatchData.reason } as any;
                 updatedAsset = AssetLifecycleService.updateField(updatedAsset, 'warehouse', whUpdates, currentUser).updatedAsset;
-                
-                // Ensure QR Hash exists
-                if (!updatedAsset.warehouse.qr_hash) {
-                    updatedAsset.warehouse.qr_hash = AssetLifecycleService.generateQRPayload(updatedAsset);
-                }
-
+                if (!updatedAsset.warehouse.qr_hash) { updatedAsset.warehouse.qr_hash = AssetLifecycleService.generateQRPayload(updatedAsset); }
                 const result = AssetLifecycleService.transitionStatus(updatedAsset, AssetStatus.DISPATCHED, currentUser);
                 batch.set(db.collection("assets").doc(result.updatedAsset.id), result.updatedAsset);
                 batch.set(db.collection("audit_log").doc(result.auditLog.id), result.auditLog);
-                
                 remainingToDispatch -= assetQty;
-
             } else {
-                // CASE 2: Split asset (Asset has more than needed)
                 const newQtyForDispatch = remainingToDispatch;
                 const remainingQtyInStock = assetQty - remainingToDispatch;
-
-                // 2a. Update original asset (reduce qty)
-                const updatedOriginalAsset = { 
-                    ...asset, 
-                    metadata: { ...asset.metadata, cantidad: remainingQtyInStock } 
-                };
+                const updatedOriginalAsset = { ...asset, metadata: { ...asset.metadata, cantidad: remainingQtyInStock } };
                 batch.set(db.collection("assets").doc(updatedOriginalAsset.id), updatedOriginalAsset);
-
-                // 2b. Create new asset for dispatch
                 const newDispatchId = generateUUID();
-                const logId = generateUUID();
-                
-                const dispatchedAsset: Asset = {
-                    ...asset,
-                    id: newDispatchId,
-                    metadata: { 
-                        ...asset.metadata, 
-                        cantidad: newQtyForDispatch,
-                        serial_ge: `${asset.metadata.serial_ge}-SPLIT` // Mark split to avoid duplicate serial issues ideally
-                    },
-                    warehouse: {
-                        ...asset.warehouse,
-                        responsable_egreso: dispatchData.employee,
-                        destino_final: dispatchData.destination,
-                        motivo_salida: dispatchData.reason,
-                        qr_hash: AssetLifecycleService.generateQRPayload({ ...asset, id: newDispatchId })
-                    },
-                    current_status: AssetStatus.RECEIVED_WH // Start here to transition validly
-                };
-
-                // Transition immediately to dispatched
+                const dispatchedAsset: Asset = { ...asset, id: newDispatchId, metadata: { ...asset.metadata, cantidad: newQtyForDispatch, serial_ge: `${asset.metadata.serial_ge}-SPLIT` }, warehouse: { ...asset.warehouse, responsable_egreso: dispatchData.employee, destino_final: dispatchData.destination, motivo_salida: dispatchData.reason, qr_hash: AssetLifecycleService.generateQRPayload({ ...asset, id: newDispatchId }) }, current_status: AssetStatus.RECEIVED_WH };
                 const result = AssetLifecycleService.transitionStatus(dispatchedAsset, AssetStatus.DISPATCHED, currentUser);
-                
-                // Log creation of split
                 batch.set(db.collection("assets").doc(result.updatedAsset.id), result.updatedAsset);
                 batch.set(db.collection("audit_log").doc(result.auditLog.id), result.auditLog);
-
                 remainingToDispatch = 0;
             }
         }
-
         await batch.commit();
         setShowDispatchModal(false);
-        setDispatchData({ quantity: 1, reason: 'Venta', destination: '', employee: '' }); // Reset
+        setDispatchData({ quantity: 1, reason: 'Venta', destination: '', employee: '' });
         setSelectedInventoryItem(null);
-        alert(`Despacho de ${dispatchData.quantity} unidades registrado exitosamente.`);
-
-    } catch (err: any) {
-        showError("Error al despachar: " + err.message);
-    }
+        setDispatchTargetId(null);
+        setScannedAsset(null);
+        alert(`Despacho registrado exitosamente.`);
+    } catch (err: any) { showError("Error al despachar: " + err.message); }
   };
 
   const handleCreateNewProduct = async (e: React.FormEvent) => {
@@ -848,35 +834,21 @@ export default function App() {
       const cost = Number(target.cost?.value || formData.get('cost'));
       const stockInicial = Number(target.stock?.value || formData.get('stock'));
       if (!pn || !description) return;
-
       try {
           const batch = db.batch();
           const timestamp = new Date().toISOString();
           for(let i=0; i < (stockInicial || 1); i++) {
-              const newId = generateUUID();
-              const logId = generateUUID();
-              const newAsset: Asset = {
-                  id: newId,
-                  current_status: stockInicial > 0 ? AssetStatus.RECEIVED_WH : AssetStatus.DRAFT, 
-                  lifecycle_lock: false,
-                  metadata: {
-                      workflow_id: 'MANUAL_ENTRY', provider: 'GENERAL', cliente_final: 'STOCK', equipo_destino: 'BODEGA', condicion: AssetCondition.PURCHASE, numero_orden_ge: 'STOCK_INIT',
-                      fecha_solicitud: timestamp, pn: String(pn), description: String(description), cantidad: 1, cost: cost, serial_ge: `GEN-${Date.now()}-${i}`
-                  },
-                  logistics: { documents: {}, extra_docs: [], tracking_number: 'MANUAL' },
-                  warehouse: { aisle: 'GEN', bin: '01', qr_hash: `MANUAL-${String(pn)}` }
-              };
+              const newId = generateUUID(); const logId = generateUUID();
+              const newAsset: Asset = { id: newId, current_status: stockInicial > 0 ? AssetStatus.RECEIVED_WH : AssetStatus.DRAFT, lifecycle_lock: false, metadata: { workflow_id: 'MANUAL_ENTRY', provider: 'GENERAL', cliente_final: 'STOCK', equipo_destino: 'BODEGA', condicion: AssetCondition.PURCHASE, numero_orden_ge: 'STOCK_INIT', fecha_solicitud: timestamp, pn: String(pn), description: String(description), cantidad: 1, cost: cost, serial_ge: `GEN-${Date.now()}-${i}` }, logistics: { documents: {}, extra_docs: [], tracking_number: 'MANUAL' }, warehouse: { aisle: 'GEN', bin: '01', qr_hash: `MANUAL-${String(pn)}` } };
               const log: AuditLogEntry = { id: logId, asset_id: newAsset.id, actor_id: currentUser.id, action: 'CREATE', prev_value: null, new_value: newAsset, timestamp };
               batch.set(db.collection("assets").doc(newAsset.id), newAsset);
               batch.set(db.collection("audit_log").doc(log.id), log);
           }
-          await batch.commit();
-          setShowAddProductModal(false);
-          alert("Producto agregado al inventario.");
-      } catch (err: any) { console.error(err); alert("Error al crear: " + err.message); }
+          await batch.commit(); setShowAddProductModal(false); alert("Producto agregado al inventario.");
+      } catch (err: any) { alert("Error al crear: " + err.message); }
   };
 
-  const handleImportInitialInventory = async () => { /* ... existing code ... */ 
+  const handleImportInitialInventory = async () => {
       if (!currentUser) return;
       if (!confirm(`¿Desea cargar el inventario inicial?`)) return;
       setImporting(true);
@@ -892,12 +864,7 @@ export default function App() {
               batchData.forEach((item: any, index: number) => {
                   if (existingPNs.has(item.sku)) return; 
                   const newId = generateUUID(); const logId = generateUUID(); const globalIndex = totalProcessed + index; 
-                  const newAsset: Asset = {
-                      id: newId, current_status: AssetStatus.RECEIVED_WH, lifecycle_lock: false,
-                      metadata: { workflow_id: 'IMPORT_INIT_PDF', provider: 'INITIAL_LOAD', cliente_final: 'STOCK', equipo_destino: 'BODEGA', condicion: AssetCondition.PURCHASE, numero_orden_ge: 'INIT-2025', fecha_solicitud: timestamp, pn: item.sku, description: item.desc, cantidad: item.qty, cost: item.cost, serial_ge: `INIT-${Date.now()}-${globalIndex}` },
-                      logistics: { documents: {}, extra_docs: [], tracking_number: 'INIT_LOAD', importacion_procesada: true },
-                      warehouse: { aisle: 'BODEGA', bin: 'GENERAL', qr_hash: `INIT-${item.sku}` }
-                  };
+                  const newAsset: Asset = { id: newId, current_status: AssetStatus.RECEIVED_WH, lifecycle_lock: false, metadata: { workflow_id: 'IMPORT_INIT_PDF', provider: 'INITIAL_LOAD', cliente_final: 'STOCK', equipo_destino: 'BODEGA', condicion: AssetCondition.PURCHASE, numero_orden_ge: 'INIT-2025', fecha_solicitud: timestamp, pn: item.sku, description: item.desc, cantidad: item.qty, cost: item.cost, serial_ge: `INIT-${Date.now()}-${globalIndex}` }, logistics: { documents: {}, extra_docs: [], tracking_number: 'INIT_LOAD', importacion_procesada: true }, warehouse: { aisle: 'BODEGA', bin: 'GENERAL', qr_hash: `INIT-${item.sku}` } };
                   const log: AuditLogEntry = { id: logId, asset_id: newId, actor_id: currentUser.id, action: 'CREATE', prev_value: null, new_value: newAsset, timestamp };
                   batch.set(db.collection("assets").doc(newId), newAsset);
                   batch.set(db.collection("audit_log").doc(log.id), log);
@@ -905,13 +872,10 @@ export default function App() {
               });
               if (batchCount > 0) { await batch.commit(); totalProcessed += batchCount; }
           }
-          alert(`Carga completa: ${totalProcessed} items nuevos.`);
-          setWarehouseSubTab('INVENTORY'); 
+          alert(`Carga completa: ${totalProcessed} items nuevos.`); setWarehouseSubTab('INVENTORY'); 
       } catch (err: any) { alert("Error al importar: " + err.message); } finally { setImporting(false); }
   };
 
-  // ... (Other handlers like handleCreateRequest, handleUpdateLogistics, etc. - kept as is but included in main render structure implicitly)
-  // [Code omitted for brevity as it remains unchanged from previous full file]
   const handleAddRequestItem = () => {
     const pn = pnRef.current?.value; const desc = descRef.current?.value; const qty = Number(qtyRef.current?.value); const cost = Number(costRef.current?.value);
     if (!pn || !desc || !qty || !cost) { showError("Complete todos los campos"); return; }
@@ -919,13 +883,13 @@ export default function App() {
     if(pnRef.current) pnRef.current.value = ''; if(descRef.current) descRef.current.value = ''; if(qtyRef.current) qtyRef.current.value = '1'; if(costRef.current) costRef.current.value = ''; pnRef.current?.focus();
   };
   const handleRemoveRequestItem = (id: string) => setRequestItems(prev => prev.filter(i => i.id !== id));
-  const handleCreateRequest = async (e: React.FormEvent) => { /* ... existing ... */ 
+  const handleCreateRequest = async (e: React.FormEvent) => {
     e.preventDefault(); if (!currentUser || !canCreateRequest) return;
     const formData = new FormData(e.target as HTMLFormElement); const batch = db.batch(); const timestamp = new Date().toISOString();
     requestItems.forEach(item => { const newId = generateUUID(); const logId = generateUUID(); const newAsset: Asset = { id: newId, current_status: AssetStatus.DRAFT, lifecycle_lock: false, metadata: { workflow_id: formData.get('workflow_id') as string, provider: formData.get('provider') as string, cliente_final: formData.get('cliente_final') as string, equipo_destino: formData.get('equipo_destino') as string, condicion: formData.get('condicion') as AssetCondition, numero_orden_ge: formData.get('numero_orden_ge') as string, fecha_solicitud: timestamp, pn: item.pn, description: item.description, cantidad: item.cantidad, cost: item.cost, serial_ge: 'PENDIENTE' }, logistics: { documents: {}, extra_docs: [] }, warehouse: {} }; const log: AuditLogEntry = { id: logId, asset_id: newAsset.id, actor_id: currentUser.id, action: 'CREATE', prev_value: null, new_value: newAsset, timestamp: timestamp }; batch.set(db.collection("assets").doc(newAsset.id), newAsset); batch.set(db.collection("audit_log").doc(log.id), log); });
     await batch.commit(); setActiveTab('LOGISTICS'); setRequestItems([]); alert(`Solicitud creada.`); setRequestMode('MENU');
   };
-  const handleTogglePendingSelection = (id: string) => { /* ... existing ... */ 
+  const handleTogglePendingSelection = (id: string) => {
       let newSelection: string[] = [];
       const clickedAsset = assets.find(a => a.id === id);
       if (pendingSelection.includes(id)) { newSelection = pendingSelection.filter(item => item !== id); } else {
@@ -937,7 +901,7 @@ export default function App() {
   };
   const handleSidebarSelect = (id: string) => { setPendingSelection([]); setIsConsolidationMode(false); setConsolidationList([]); setSelectedAssetId(id); if(activeTab === 'REQUEST') setActiveTab('LOGISTICS'); };
   const handleGoToClosing = () => { if (!selectedAsset) return; if (!selectedAsset.metadata.cost_breakdown?.items || selectedAsset.metadata.cost_breakdown.items.length === 0) { populateItemsFromAsset(selectedAsset); } setLogisticsSubTab('FINAL'); };
-  const handleUpdateLogisticsInitial = async (e: React.FormEvent) => { /* ... existing ... */ 
+  const handleUpdateLogisticsInitial = async (e: React.FormEvent) => {
       e.preventDefault(); if (!selectedAsset || !currentUser) return;
       const formData = new FormData(e.target as HTMLFormElement);
       try {
@@ -956,7 +920,7 @@ export default function App() {
         await batch.commit(); setPendingSelection([]); setConsolidationList([]); setIsConsolidationMode(false); alert(`Datos guardados.`);
       } catch (err: any) { showError(err.message); }
   };
-  const handleUpdateLogisticsFinal = async (e: React.FormEvent) => { /* ... existing ... */ 
+  const handleUpdateLogisticsFinal = async (e: React.FormEvent) => {
     e.preventDefault(); if (!selectedAsset || !currentUser) return; const formData = new FormData(e.target as HTMLFormElement);
     try {
         const costBreakdown: ImportationCosts = { fecha_llegada_almacen: formData.get('fecha_llegada_almacen') as string, no_liquidacion: formData.get('no_liquidacion') as string, no_dai: formData.get('no_dai') as string, ...localExpenses, total_gastos_locales: (Object.values(localExpenses) as number[]).reduce((a, b) => a + b, 0), items: itemsState, facturas_proveedores: [] };
@@ -968,7 +932,7 @@ export default function App() {
         batch.set(db.collection("assets").doc(currentAsset.id), currentAsset); await batch.commit(); alert(`Costos guardados.`);
     } catch (err: any) { showError(err.message); }
   };
-  const handleUploadDoc = async (e: React.FormEvent) => { /* ... existing ... */ e.preventDefault(); if (!selectedAsset || !currentUser || !docFile || !docName) return; try { const newDoc: StoredDocument = { id: generateUUID(), name: docName, filename: docFile.name, uploaded_by: currentUser.name, date: new Date().toISOString(), url: '#' }; const currentDocs = selectedAsset.logistics.extra_docs || []; const result = AssetLifecycleService.updateField(selectedAsset, 'logistics', { extra_docs: [...currentDocs, newDoc] }, currentUser); const batch = db.batch(); batch.set(db.collection("assets").doc(result.updatedAsset.id), result.updatedAsset); batch.set(db.collection("audit_log").doc(result.auditLog.id), result.auditLog); await batch.commit(); setDocName(''); setDocFile(null); alert("Documento agregado."); } catch (err: any) { showError(err.message); } };
+  const handleUploadDoc = async (e: React.FormEvent) => { e.preventDefault(); if (!selectedAsset || !currentUser || !docFile || !docName) return; try { const newDoc: StoredDocument = { id: generateUUID(), name: docName, filename: docFile.name, uploaded_by: currentUser.name, date: new Date().toISOString(), url: '#' }; const currentDocs = selectedAsset.logistics.extra_docs || []; const result = AssetLifecycleService.updateField(selectedAsset, 'logistics', { extra_docs: [...currentDocs, newDoc] }, currentUser); const batch = db.batch(); batch.set(db.collection("assets").doc(result.updatedAsset.id), result.updatedAsset); batch.set(db.collection("audit_log").doc(result.auditLog.id), result.auditLog); await batch.commit(); setDocName(''); setDocFile(null); alert("Documento agregado."); } catch (err: any) { showError(err.message); } };
   const handleDeleteDoc = async (docId: string) => { if (!selectedAsset || !currentUser) return; if (!confirm("¿Eliminar documento?")) return; try { const currentDocs = selectedAsset.logistics.extra_docs || []; const result = AssetLifecycleService.updateField(selectedAsset, 'logistics', { extra_docs: currentDocs.filter(d => d.id !== docId) }, currentUser); const batch = db.batch(); batch.set(db.collection("assets").doc(result.updatedAsset.id), result.updatedAsset); batch.set(db.collection("audit_log").doc(result.auditLog.id), result.auditLog); await batch.commit(); } catch (err: any) { showError(err.message); } };
   const handleScanMock = () => { if(assets.length>0) setScannedAsset(assets[0]); else showError("No assets."); };
   const showError = (msg: string) => { setErrorMsg(msg); setTimeout(() => setErrorMsg(null), 5000); };
@@ -980,22 +944,22 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-100 flex flex-col font-sans">
-      <header className="bg-slate-900 text-white p-4 shadow-md flex justify-between items-center z-10 sticky top-0">
+      <header className="bg-slate-900 text-white p-3 md:p-4 shadow-md flex justify-between items-center z-20 sticky top-0 safe-top">
         <div className="flex items-center gap-3">
             <div className="flex items-center gap-2">
-                {!logoError ? ( <img src="./logo.png" alt="OmniTrace Logo" className="h-8 w-auto object-contain" onError={() => setLogoError(true)} /> ) : ( <Eye size={28} className="text-blue-400" strokeWidth={2.5} /> )}
-                <h1 className="text-xl font-bold tracking-tight text-white hidden md:block">OmniTrace</h1>
+                {!logoError ? ( <img src="./logo.png" alt="OmniTrace Logo" className="h-6 md:h-8 w-auto object-contain" onError={() => setLogoError(true)} /> ) : ( <Eye size={24} className="text-blue-400" strokeWidth={2.5} /> )}
+                <h1 className="text-lg md:text-xl font-bold tracking-tight text-white hidden sm:block">OmniTrace</h1>
             </div>
         </div>
 
         {/* Global Search Bar */}
-        <div className="flex-1 max-w-xl mx-4 relative">
+        <div className="flex-1 max-w-xs md:max-w-xl mx-2 md:mx-4 relative">
             <div className="relative">
-                <Search className="absolute left-3 top-2.5 text-slate-400 pointer-events-none" size={18} />
+                <Search className="absolute left-3 top-2 md:top-2.5 text-slate-400 pointer-events-none" size={16} />
                 <input 
                     type="text" 
-                    placeholder="Buscar Orden, P/N, Serial o Descripción..." 
-                    className="w-full bg-slate-800 text-white border border-slate-700 rounded-lg pl-10 pr-4 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all placeholder:text-slate-500"
+                    placeholder="Buscar..." 
+                    className="w-full bg-slate-800 text-white border border-slate-700 rounded-lg pl-9 pr-4 py-1.5 md:py-2 text-xs md:text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all placeholder:text-slate-500"
                     value={globalSearchTerm}
                     onChange={(e) => {
                         setGlobalSearchTerm(e.target.value);
@@ -1046,8 +1010,9 @@ export default function App() {
 
       {errorMsg && <div className="fixed top-20 right-4 bg-red-100 border border-red-400 text-red-700 px-6 py-4 rounded shadow-xl z-50 animate-bounce">{errorMsg}</div>}
 
-      <div className="flex flex-1 overflow-hidden">
-        <nav className="w-20 md:w-64 bg-white border-r border-slate-200 flex flex-col z-0 transition-all duration-300">
+      <div className="flex flex-1 overflow-hidden relative">
+        {/* DESKTOP SIDEBAR (Hidden on mobile) */}
+        <nav className="hidden md:flex w-64 bg-white border-r border-slate-200 flex-col z-0 transition-all duration-300">
             <div className="p-4 space-y-2">
                 <NavButton active={activeTab==='DASHBOARD'} onClick={()=>setActiveTab('DASHBOARD')} icon={<LayoutDashboard size={18}/>} label="Dashboard" />
                 <NavButton active={activeTab==='REQUEST'} onClick={()=>{setActiveTab('REQUEST'); setRequestMode('MENU');}} icon={<FileText size={18}/>} label="1. Solicitud" disabled={!canCreateRequest}/>
@@ -1057,7 +1022,7 @@ export default function App() {
                 <NavButton active={activeTab==='SCANNER'} onClick={()=>setActiveTab('SCANNER')} icon={<QrCode size={18}/>} label="4. Escáner" />
             </div>
             
-            <div className="mt-auto p-4 border-t border-slate-100 hidden md:block">
+            <div className="mt-auto p-4 border-t border-slate-100">
                 <h4 className="text-xs font-bold text-slate-400 uppercase mb-2">Actividad Reciente</h4>
                 <div className="space-y-1">
                     {logs.slice(0, 3).map(log => (
@@ -1069,16 +1034,17 @@ export default function App() {
             </div>
         </nav>
 
-        <main className="flex-1 overflow-auto p-6 bg-slate-50">
+        {/* MAIN CONTENT AREA - Padding bottom added for mobile nav */}
+        <main className="flex-1 overflow-auto p-4 md:p-6 bg-slate-50 pb-24 md:pb-6">
             {/* --- DASHBOARD TAB --- */}
             {activeTab === 'DASHBOARD' && (
                 <div className="space-y-6 animate-fadeIn">
                     <div className="flex justify-between items-end mb-2">
                         <div>
-                            <h2 className="text-2xl font-bold text-slate-800">Panel de Control</h2>
-                            <p className="text-slate-500 text-sm">Resumen general del estado del inventario y operaciones.</p>
+                            <h2 className="text-xl md:text-2xl font-bold text-slate-800">Panel de Control</h2>
+                            <p className="text-slate-500 text-xs md:text-sm">Resumen general del estado del inventario y operaciones.</p>
                         </div>
-                        <div className="text-right">
+                        <div className="text-right hidden sm:block">
                             <div className="text-sm font-bold text-slate-700">{new Date().toLocaleDateString('es-ES', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</div>
                         </div>
                     </div>
@@ -1191,24 +1157,24 @@ export default function App() {
                 <div className="animate-fadeIn">
                     {/* MENU MODE */}
                     {requestMode === 'MENU' && (
-                        <div className="max-w-5xl mx-auto mt-10">
-                            <div className="text-center mb-12">
-                                <h2 className="text-3xl font-bold text-slate-800 mb-2">Crear Nueva Solicitud</h2>
-                                <p className="text-slate-500">Seleccione el tipo de requerimiento para iniciar el flujo de aprobación.</p>
+                        <div className="max-w-5xl mx-auto mt-4 md:mt-10">
+                            <div className="text-center mb-6 md:mb-12">
+                                <h2 className="text-2xl md:text-3xl font-bold text-slate-800 mb-2">Crear Nueva Solicitud</h2>
+                                <p className="text-slate-500 text-sm">Seleccione el tipo de requerimiento para iniciar el flujo de aprobación.</p>
                             </div>
                             
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-8 max-w-4xl mx-auto">
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-8 max-w-4xl mx-auto">
                                 <button 
                                     onClick={() => setRequestMode('PARTS')}
-                                    className="bg-white p-8 rounded-2xl shadow-lg border border-slate-100 hover:border-blue-500 hover:shadow-xl transition-all group text-left flex flex-col h-64 justify-between relative overflow-hidden"
+                                    className="bg-white p-6 md:p-8 rounded-2xl shadow-lg border border-slate-100 hover:border-blue-500 hover:shadow-xl transition-all group text-left flex flex-col h-56 md:h-64 justify-between relative overflow-hidden"
                                 >
                                     <div className="absolute top-0 right-0 w-32 h-32 bg-blue-50 rounded-full -mr-16 -mt-16 transition-transform group-hover:scale-150"></div>
                                     <div className="relative z-10">
-                                        <div className="bg-blue-100 w-14 h-14 rounded-xl flex items-center justify-center mb-6 group-hover:bg-blue-600 transition-colors">
-                                            <Cpu size={32} className="text-blue-600 group-hover:text-white" />
+                                        <div className="bg-blue-100 w-12 h-12 md:w-14 md:h-14 rounded-xl flex items-center justify-center mb-4 md:mb-6 group-hover:bg-blue-600 transition-colors">
+                                            <Cpu size={28} className="text-blue-600 group-hover:text-white" />
                                         </div>
-                                        <h3 className="text-xl font-bold text-slate-800 mb-2">Solicitud de Repuestos</h3>
-                                        <p className="text-sm text-slate-500">Requerimiento de partes, piezas y consumibles para mantenimiento o stock.</p>
+                                        <h3 className="text-lg md:text-xl font-bold text-slate-800 mb-2">Solicitud de Repuestos</h3>
+                                        <p className="text-xs md:text-sm text-slate-500">Requerimiento de partes, piezas y consumibles para mantenimiento o stock.</p>
                                     </div>
                                     <div className="relative z-10 flex items-center text-blue-600 font-bold text-sm mt-4 group-hover:translate-x-2 transition-transform">
                                         Iniciar Solicitud <ArrowRight size={16} className="ml-2"/>
@@ -1217,15 +1183,15 @@ export default function App() {
 
                                 <button 
                                     onClick={() => setRequestMode('EQUIPMENT')}
-                                    className="bg-white p-8 rounded-2xl shadow-lg border border-slate-100 hover:border-indigo-500 hover:shadow-xl transition-all group text-left flex flex-col h-64 justify-between relative overflow-hidden"
+                                    className="bg-white p-6 md:p-8 rounded-2xl shadow-lg border border-slate-100 hover:border-indigo-500 hover:shadow-xl transition-all group text-left flex flex-col h-56 md:h-64 justify-between relative overflow-hidden"
                                 >
                                     <div className="absolute top-0 right-0 w-32 h-32 bg-indigo-50 rounded-full -mr-16 -mt-16 transition-transform group-hover:scale-150"></div>
                                     <div className="relative z-10">
-                                        <div className="bg-indigo-100 w-14 h-14 rounded-xl flex items-center justify-center mb-6 group-hover:bg-indigo-600 transition-colors">
-                                            <Monitor size={32} className="text-indigo-600 group-hover:text-white" />
+                                        <div className="bg-indigo-100 w-12 h-12 md:w-14 md:h-14 rounded-xl flex items-center justify-center mb-4 md:mb-6 group-hover:bg-indigo-600 transition-colors">
+                                            <Monitor size={28} className="text-indigo-600 group-hover:text-white" />
                                         </div>
-                                        <h3 className="text-xl font-bold text-slate-800 mb-2">Solicitud de Equipos</h3>
-                                        <p className="text-sm text-slate-500">Adquisición de nuevos equipos médicos, maquinaria o activos fijos.</p>
+                                        <h3 className="text-lg md:text-xl font-bold text-slate-800 mb-2">Solicitud de Equipos</h3>
+                                        <p className="text-xs md:text-sm text-slate-500">Adquisición de nuevos equipos médicos, maquinaria o activos fijos.</p>
                                     </div>
                                     <div className="relative z-10 flex items-center text-indigo-600 font-bold text-sm mt-4 group-hover:translate-x-2 transition-transform">
                                         Iniciar Solicitud <ArrowRight size={16} className="ml-2"/>
@@ -1238,23 +1204,59 @@ export default function App() {
                     {/* PARTS FORM MODE */}
                     {requestMode === 'PARTS' && (
                         <div className="max-w-4xl mx-auto bg-white rounded-lg shadow-lg overflow-hidden flex flex-col animate-fadeIn">
-                            <div className="bg-slate-800 p-6 text-white flex justify-between items-center">
+                            <div className="bg-slate-800 p-4 md:p-6 text-white flex justify-between items-center">
                                 <div className="flex items-center gap-4">
                                     <button onClick={() => setRequestMode('MENU')} className="hover:bg-slate-700 p-2 rounded-full transition-colors">
                                         <ArrowLeft size={20} />
                                     </button>
                                     <div>
-                                        <h2 className="text-lg font-bold">Solicitud de Repuestos</h2>
-                                        <p className="text-slate-400 text-xs">Cree una solicitud para uno o varios repuestos bajo el mismo Workflow.</p>
+                                        <h2 className="text-base md:text-lg font-bold">Solicitud de Repuestos</h2>
+                                        <p className="text-slate-400 text-[10px] md:text-xs">Cree una solicitud para uno o varios repuestos bajo el mismo Workflow.</p>
                                     </div>
                                 </div>
                                 {!canCreateRequest && <span className="bg-red-500 text-white text-xs px-2 py-1 rounded">Solo Lectura</span>}
                             </div>
-                            <form onSubmit={handleCreateRequest} className="p-8 space-y-8">
-                                <div className="bg-slate-50 p-4 rounded border border-slate-200"><h3 className="text-sm font-bold text-slate-700 uppercase mb-4 border-b pb-2">1. Datos Generales (Cabecera)</h3><div className="grid grid-cols-2 gap-6"><EditableField label="Workflow ID" name="workflow_id" disabled={!canCreateRequest}/><EditableField label="Orden GE / Pedido" name="numero_orden_ge" disabled={!canCreateRequest}/><EditableField label="Proveedor" name="provider" disabled={!canCreateRequest}/><EditableField label="Cliente Final" name="cliente_final" disabled={!canCreateRequest}/><EditableField label="Equipo Destino" name="equipo_destino" disabled={!canCreateRequest}/><div className="flex flex-col"><label className="text-xs font-bold text-slate-500 uppercase mb-1">Condición</label><select name="condicion" className="border rounded p-2 text-sm bg-white" disabled={!canCreateRequest}>{Object.values(AssetCondition).map(c=><option key={c} value={c}>{c}</option>)}</select></div></div></div>
-                                <div><h3 className="text-sm font-bold text-slate-700 uppercase mb-4 border-b pb-2 flex justify-between items-center"><span>2. Detalle de Repuestos ({requestItems.length})</span><span className="text-xs font-normal text-slate-500">Agregue los items antes de guardar</span></h3>
-                                    <div className="mb-4 border rounded overflow-hidden"><table className="w-full text-sm text-left"><thead className="bg-slate-100 text-slate-600 text-xs uppercase"><tr><th className="p-3">P/N</th><th className="p-3">Descripción</th><th className="p-3 text-center">Cant.</th><th className="p-3 text-right">Costo Est.</th><th className="p-3 text-right">Total</th><th className="p-3 w-10"></th></tr></thead><tbody>{requestItems.length === 0 ? ( <tr><td colSpan={6} className="p-8 text-center text-slate-400 italic">No hay repuestos agregados a la lista.</td></tr> ) : ( requestItems.map(item => ( <tr key={item.id} className="border-b hover:bg-slate-50"><td className="p-3 font-medium">{item.pn}</td><td className="p-3 text-slate-600">{item.description}</td><td className="p-3 text-center">{item.cantidad}</td><td className="p-3 text-right">${item.cost.toFixed(2)}</td><td className="p-3 text-right font-bold">${(item.cantidad * item.cost).toFixed(2)}</td><td className="p-3 text-center"><button type="button" onClick={() => handleRemoveRequestItem(item.id)} className="text-red-400 hover:text-red-600"><Trash2 size={16}/></button></td></tr> )) )}</tbody></table></div>
-                                    {canCreateRequest && (<div className="bg-yellow-50 p-4 rounded border border-yellow-200 flex gap-4 items-end"><div className="flex-1"><label className="text-[10px] font-bold text-slate-500 uppercase block mb-1">Número de Parte (P/N)</label><input ref={pnRef} type="text" placeholder="Ej. 5406622" className="w-full border rounded p-2 text-sm"/></div><div className="flex-[2]"><label className="text-[10px] font-bold text-slate-500 uppercase block mb-1">Descripción</label><input ref={descRef} type="text" placeholder="Ej. BOARD, MAIN SYSTEM" className="w-full border rounded p-2 text-sm"/></div><div className="w-20"><label className="text-[10px] font-bold text-slate-500 uppercase block mb-1">Cant.</label><input ref={qtyRef} type="number" min="1" defaultValue="1" className="w-full border rounded p-2 text-sm text-center"/></div><div className="w-32"><label className="text-[10px] font-bold text-slate-500 uppercase block mb-1">Costo Unit ($)</label><input ref={costRef} type="number" min="0" step="0.01" className="w-full border rounded p-2 text-sm text-right"/></div><button type="button" onClick={handleAddRequestItem} className="bg-slate-800 text-white p-2 rounded hover:bg-slate-900 transition-colors h-10 w-10 flex items-center justify-center"><Plus size={20} /></button></div>)}
+                            <form onSubmit={handleCreateRequest} className="p-4 md:p-8 space-y-6 md:space-y-8">
+                                <div className="bg-slate-50 p-4 rounded border border-slate-200">
+                                    <h3 className="text-sm font-bold text-slate-700 uppercase mb-4 border-b pb-2">1. Datos Generales (Cabecera)</h3>
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
+                                        <EditableField label="Workflow ID" name="workflow_id" disabled={!canCreateRequest}/>
+                                        <EditableField label="Orden GE / Pedido" name="numero_orden_ge" disabled={!canCreateRequest}/>
+                                        <EditableField label="Proveedor" name="provider" disabled={!canCreateRequest}/>
+                                        <EditableField label="Cliente Final" name="cliente_final" disabled={!canCreateRequest}/>
+                                        <EditableField label="Equipo Destino" name="equipo_destino" disabled={!canCreateRequest}/>
+                                        <div className="flex flex-col">
+                                            <label className="text-xs font-bold text-slate-500 uppercase mb-1">Condición</label>
+                                            <select name="condicion" className="border rounded p-2 text-sm bg-white" disabled={!canCreateRequest}>
+                                                {Object.values(AssetCondition).map(c=><option key={c} value={c}>{c}</option>)}
+                                            </select>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div>
+                                    <h3 className="text-sm font-bold text-slate-700 uppercase mb-4 border-b pb-2 flex justify-between items-center">
+                                        <span>2. Detalle de Repuestos ({requestItems.length})</span>
+                                        <span className="text-xs font-normal text-slate-500 hidden md:inline">Agregue los items antes de guardar</span>
+                                    </h3>
+                                    <div className="mb-4 border rounded overflow-hidden overflow-x-auto">
+                                        <table className="w-full text-sm text-left min-w-[600px]">
+                                            <thead className="bg-slate-100 text-slate-600 text-xs uppercase"><tr><th className="p-3">P/N</th><th className="p-3">Descripción</th><th className="p-3 text-center">Cant.</th><th className="p-3 text-right">Costo Est.</th><th className="p-3 text-right">Total</th><th className="p-3 w-10"></th></tr></thead>
+                                            <tbody>
+                                                {requestItems.length === 0 ? ( <tr><td colSpan={6} className="p-8 text-center text-slate-400 italic">No hay repuestos agregados a la lista.</td></tr> ) : ( requestItems.map(item => ( <tr key={item.id} className="border-b hover:bg-slate-50"><td className="p-3 font-medium">{item.pn}</td><td className="p-3 text-slate-600">{item.description}</td><td className="p-3 text-center">{item.cantidad}</td><td className="p-3 text-right">${item.cost.toFixed(2)}</td><td className="p-3 text-right font-bold">${(item.cantidad * item.cost).toFixed(2)}</td><td className="p-3 text-center"><button type="button" onClick={() => handleRemoveRequestItem(item.id)} className="text-red-400 hover:text-red-600"><Trash2 size={16}/></button></td></tr> )) )}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                    {canCreateRequest && (
+                                        <div className="bg-yellow-50 p-4 rounded border border-yellow-200 flex flex-col md:flex-row gap-4 items-end">
+                                            <div className="flex-1 w-full"><label className="text-[10px] font-bold text-slate-500 uppercase block mb-1">Número de Parte (P/N)</label><input ref={pnRef} type="text" placeholder="Ej. 5406622" className="w-full border rounded p-2 text-sm"/></div>
+                                            <div className="flex-[2] w-full"><label className="text-[10px] font-bold text-slate-500 uppercase block mb-1">Descripción</label><input ref={descRef} type="text" placeholder="Ej. BOARD, MAIN SYSTEM" className="w-full border rounded p-2 text-sm"/></div>
+                                            <div className="flex gap-4 w-full md:w-auto">
+                                                <div className="w-20"><label className="text-[10px] font-bold text-slate-500 uppercase block mb-1">Cant.</label><input ref={qtyRef} type="number" min="1" defaultValue="1" className="w-full border rounded p-2 text-sm text-center"/></div>
+                                                <div className="w-32"><label className="text-[10px] font-bold text-slate-500 uppercase block mb-1">Costo Unit ($)</label><input ref={costRef} type="number" min="0" step="0.01" className="w-full border rounded p-2 text-sm text-right"/></div>
+                                                <button type="button" onClick={handleAddRequestItem} className="bg-slate-800 text-white p-2 rounded hover:bg-slate-900 transition-colors h-10 w-10 flex items-center justify-center self-end"><Plus size={20} /></button>
+                                            </div>
+                                        </div>
+                                    )}
                                 </div>
                                 <div className="pt-6 border-t flex justify-end"><button type="submit" disabled={requestItems.length === 0} className="bg-emerald-600 text-white px-8 py-3 rounded-lg font-bold hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 shadow-lg transition-transform transform active:scale-95"><ShoppingCart size={20} /> Crear Solicitud ({requestItems.length} items)</button></div>
                             </form>
@@ -1293,40 +1295,99 @@ export default function App() {
                 <div className="space-y-6">
                     {pendingAssets.length > 0 && (
                         <div className="bg-red-50 border border-red-200 rounded-lg shadow-sm p-4 animate-fadeIn">
-                             <div className="flex justify-between items-center mb-3 border-b border-red-100 pb-2"><h3 className="text-red-800 font-bold flex items-center gap-2"><AlertTriangle size={18} className="text-red-500" />Solicitudes Pendientes por Atender ({pendingAssets.length})</h3>{pendingSelection.length > 0 && (<button onClick={()=>setPendingSelection([])} className="text-xs text-red-600 underline hover:text-red-800">Limpiar selección</button>)}</div>
-                             <div className="max-h-48 overflow-y-auto pr-2 space-y-2">{pendingAssets.map(asset => ( <div key={asset.id} onClick={() => handleTogglePendingSelection(asset.id)} className={`flex items-center gap-4 bg-white p-3 rounded border hover:shadow-md transition-all cursor-pointer ${pendingSelection.includes(asset.id) ? 'border-red-500 ring-1 ring-red-200' : 'border-red-100'}`}><div className={`w-5 h-5 rounded border flex items-center justify-center ${pendingSelection.includes(asset.id) ? 'bg-red-500 border-red-600' : 'border-slate-300'}`}>{pendingSelection.includes(asset.id) && <CheckSquare size={14} className="text-white"/>}</div><div className="flex-1 grid grid-cols-4 gap-4 text-sm"><div><span className="text-[10px] uppercase text-slate-400 font-bold block">P/N</span><span className="font-bold text-slate-800">{asset.metadata.pn}</span></div><div><span className="text-[10px] uppercase text-slate-400 font-bold block">Descripción</span><span className="text-slate-600 truncate block">{asset.metadata.description}</span></div><div><span className="text-[10px] uppercase text-slate-400 font-bold block">Proveedor</span><span className="text-slate-600">{asset.metadata.provider || 'N/A'}</span></div><div><span className="text-[10px] uppercase text-slate-400 font-bold block">Solicitado</span><span className="text-slate-500">{new Date(asset.metadata.fecha_solicitud).toLocaleDateString()}</span></div></div></div> ))}</div>
+                             <div className="flex justify-between items-center mb-3 border-b border-red-100 pb-2"><h3 className="text-red-800 font-bold flex items-center gap-2 text-sm"><AlertTriangle size={18} className="text-red-500" />Solicitudes Pendientes ({pendingAssets.length})</h3>{pendingSelection.length > 0 && (<button onClick={()=>setPendingSelection([])} className="text-xs text-red-600 underline hover:text-red-800">Limpiar selección</button>)}</div>
+                             <div className="max-h-48 overflow-y-auto pr-2 space-y-2">{pendingAssets.map(asset => ( <div key={asset.id} onClick={() => handleTogglePendingSelection(asset.id)} className={`flex items-center gap-4 bg-white p-3 rounded border hover:shadow-md transition-all cursor-pointer ${pendingSelection.includes(asset.id) ? 'border-red-500 ring-1 ring-red-200' : 'border-red-100'}`}><div className={`w-5 h-5 rounded border flex items-center justify-center shrink-0 ${pendingSelection.includes(asset.id) ? 'bg-red-500 border-red-600' : 'border-slate-300'}`}>{pendingSelection.includes(asset.id) && <CheckSquare size={14} className="text-white"/>}</div><div className="flex-1 grid grid-cols-1 md:grid-cols-4 gap-1 md:gap-4 text-sm"><div><span className="text-[10px] uppercase text-slate-400 font-bold block md:hidden">P/N</span><span className="font-bold text-slate-800">{asset.metadata.pn}</span></div><div><span className="text-[10px] uppercase text-slate-400 font-bold block md:hidden">Descripción</span><span className="text-slate-600 truncate block">{asset.metadata.description}</span></div><div><span className="text-[10px] uppercase text-slate-400 font-bold block md:hidden">Proveedor</span><span className="text-slate-600">{asset.metadata.provider || 'N/A'}</span></div><div><span className="text-[10px] uppercase text-slate-400 font-bold block md:hidden">Solicitado</span><span className="text-slate-500">{new Date(asset.metadata.fecha_solicitud).toLocaleDateString()}</span></div></div></div> ))}</div>
                         </div>
                     )}
-                    {!selectedAsset && (<div className="bg-white rounded-lg shadow border border-slate-200 overflow-hidden animate-fadeIn"><div className="bg-slate-50 px-6 py-4 border-b border-slate-200"><h3 className="font-bold text-slate-700 flex items-center gap-2"><Layers size={20} className="text-blue-600"/>Tablero de Órdenes de Compra</h3><p className="text-xs text-slate-400 mt-1">Listado general de órdenes en curso y finalizadas.</p></div><table className="w-full text-sm text-left"><thead className="bg-slate-100 text-slate-500 uppercase text-xs"><tr><th className="p-4">Orden GE</th><th className="p-4">Proveedor</th><th className="p-4">Items</th><th className="p-4">Estado Logístico</th><th className="p-4">Progreso</th><th className="p-4 text-center"></th></tr></thead><tbody className="divide-y divide-slate-100">{Object.entries(assetsByOrder).map(([orderId, group]) => { if (orderId === 'SIN_ORDEN') return null; const mainAsset = group[0]; const isImportClosed = mainAsset.logistics.importacion_procesada; let rowClass = "hover:bg-slate-50"; let statusColor = "bg-slate-100 text-slate-600"; let statusText = "Borrador"; let icon = <Clock size={16}/>; if (mainAsset.current_status !== AssetStatus.DRAFT) { if (isImportClosed) { rowClass = "bg-emerald-50/30 hover:bg-emerald-50"; statusColor = "bg-emerald-100 text-emerald-700 border border-emerald-200"; statusText = "Importación Finalizada"; icon = <CheckCircle size={16}/>; } else { rowClass = "bg-amber-50/30 hover:bg-amber-50"; statusColor = "bg-amber-100 text-amber-700 border border-amber-200"; statusText = "En Proceso (Abierto)"; icon = <Truck size={16}/>; } } return (<tr key={orderId} className={`transition-colors cursor-pointer group ${rowClass}`} onClick={() => handleSidebarSelect(mainAsset.id)}><td className="p-4 font-bold text-slate-700">{orderId}</td><td className="p-4 text-slate-600">{mainAsset.metadata.provider}</td><td className="p-4"><span className="bg-slate-200 text-slate-700 px-2 py-1 rounded text-xs font-bold">{group.length} items</span></td><td className="p-4"><StatusBadge status={mainAsset.current_status} /></td><td className="p-4"><div className={`flex items-center gap-2 px-3 py-1 rounded-full w-fit text-xs font-bold ${statusColor}`}>{icon} {statusText}</div></td><td className="p-4 text-center text-slate-400 group-hover:text-blue-600"><ChevronRight size={20}/></td></tr>) })}</tbody></table></div>)}
+                    {!selectedAsset && (
+                        <div className="bg-white rounded-lg shadow border border-slate-200 overflow-hidden animate-fadeIn">
+                            <div className="bg-slate-50 px-6 py-4 border-b border-slate-200">
+                                <h3 className="font-bold text-slate-700 flex items-center gap-2"><Layers size={20} className="text-blue-600"/>Tablero de Órdenes</h3>
+                                <p className="text-xs text-slate-400 mt-1">Listado general de órdenes en curso.</p>
+                            </div>
+                            <div className="overflow-x-auto">
+                                <table className="w-full text-sm text-left min-w-[700px]">
+                                    <thead className="bg-slate-100 text-slate-500 uppercase text-xs"><tr><th className="p-4">Orden GE</th><th className="p-4">Proveedor</th><th className="p-4">Items</th><th className="p-4">Estado Logístico</th><th className="p-4">Progreso</th><th className="p-4 text-center"></th></tr></thead>
+                                    <tbody className="divide-y divide-slate-100">{Object.entries(assetsByOrder).map(([orderId, group]) => { if (orderId === 'SIN_ORDEN') return null; const mainAsset = group[0]; const isImportClosed = mainAsset.logistics.importacion_procesada; let rowClass = "hover:bg-slate-50"; let statusColor = "bg-slate-100 text-slate-600"; let statusText = "Borrador"; let icon = <Clock size={16}/>; if (mainAsset.current_status !== AssetStatus.DRAFT) { if (isImportClosed) { rowClass = "bg-emerald-50/30 hover:bg-emerald-50"; statusColor = "bg-emerald-100 text-emerald-700 border border-emerald-200"; statusText = "Importación Finalizada"; icon = <CheckCircle size={16}/>; } else { rowClass = "bg-amber-50/30 hover:bg-amber-50"; statusColor = "bg-amber-100 text-amber-700 border border-amber-200"; statusText = "En Proceso (Abierto)"; icon = <Truck size={16}/>; } } return (<tr key={orderId} className={`transition-colors cursor-pointer group ${rowClass}`} onClick={() => handleSidebarSelect(mainAsset.id)}><td className="p-4 font-bold text-slate-700">{orderId}</td><td className="p-4 text-slate-600">{mainAsset.metadata.provider}</td><td className="p-4"><span className="bg-slate-200 text-slate-700 px-2 py-1 rounded text-xs font-bold">{group.length} items</span></td><td className="p-4"><StatusBadge status={mainAsset.current_status} /></td><td className="p-4"><div className={`flex items-center gap-2 px-3 py-1 rounded-full w-fit text-xs font-bold ${statusColor}`}>{icon} {statusText}</div></td><td className="p-4 text-center text-slate-400 group-hover:text-blue-600"><ChevronRight size={20}/></td></tr>) })}</tbody>
+                                </table>
+                            </div>
+                        </div>
+                    )}
                     {selectedAsset && (
                         <div className="bg-white rounded-lg shadow overflow-hidden flex flex-col">
-                            <div className="bg-slate-800 text-white p-6 pb-8">
+                            <div className="bg-slate-800 text-white p-4 md:p-6 pb-8">
                                 <button onClick={() => setSelectedAssetId(null)} className="text-xs text-slate-400 hover:text-white flex items-center gap-1 mb-4 transition-colors font-bold"><ArrowLeft size={16}/> Volver al Tablero</button>
-                                <div className="flex justify-between items-start">
+                                <div className="flex flex-col md:flex-row justify-between items-start">
                                     <div>
-                                        <h2 className="text-2xl font-bold flex items-center gap-2"><FileText className="text-blue-400" />Orden: {selectedAsset.metadata.numero_orden_ge}</h2>
-                                        <p className="text-slate-400 mt-1 flex items-center gap-2 text-sm"><Truck size={14}/> {selectedAsset.metadata.provider} <span className="text-slate-600">|</span> Workflow: {selectedAsset.metadata.workflow_id}</p>
+                                        <h2 className="text-xl md:text-2xl font-bold flex items-center gap-2"><FileText className="text-blue-400" />Orden: {selectedAsset.metadata.numero_orden_ge}</h2>
+                                        <p className="text-slate-400 mt-1 flex flex-wrap items-center gap-2 text-sm"><Truck size={14}/> {selectedAsset.metadata.provider} <span className="text-slate-600">|</span> Workflow: {selectedAsset.metadata.workflow_id}</p>
                                     </div>
-                                    <div className="text-right">
+                                    <div className="text-left md:text-right mt-2 md:mt-0">
                                         <div className="mb-2"><StatusBadge status={selectedAsset.current_status} /></div>
                                         <div className="text-xs text-slate-400">Creado: {new Date(selectedAsset.metadata.fecha_solicitud).toLocaleDateString()}</div>
                                     </div>
                                 </div>
                             </div>
-                            <div className="-mt-4 mx-6 space-y-6 pb-6">
-                                <div className="bg-white rounded-lg shadow-md border border-slate-200 overflow-hidden"><div className="bg-slate-50 px-4 py-3 border-b border-slate-200"><h3 className="font-bold text-slate-700 flex items-center gap-2 text-sm"><ShoppingCart size={16} className="text-indigo-500"/> 1. Datos de Solicitud (Origen)</h3></div><div className="p-4 grid grid-cols-4 gap-6 text-sm"><InfoField label="Proveedor" value={selectedAsset.metadata.provider} /><InfoField label="Cliente Final" value={selectedAsset.metadata.cliente_final} /><InfoField label="Equipo Destino" value={selectedAsset.metadata.equipo_destino} /><InfoField label="Condición" value={selectedAsset.metadata.condicion} /></div></div>
+                            <div className="-mt-4 mx-2 md:mx-6 space-y-6 pb-6">
                                 <div className="bg-white rounded-lg shadow-md border border-slate-200 overflow-hidden">
-                                    <div className="bg-blue-50 px-4 py-3 border-b border-blue-100 flex justify-between items-center"><h3 className="font-bold text-blue-900 flex items-center gap-2 text-sm"><Truck size={16} className="text-blue-600"/> 2. Gestión Logística & Financiera</h3><div className="flex gap-2 bg-white rounded p-0.5 border border-blue-100"><button onClick={()=>setLogisticsSubTab('INITIAL')} className={`px-3 py-1 text-xs font-bold rounded transition-colors ${logisticsSubTab==='INITIAL'?'bg-blue-100 text-blue-800':'text-slate-400 hover:text-blue-600'}`}>Tracking</button><button onClick={handleGoToClosing} className={`px-3 py-1 text-xs font-bold rounded transition-colors ${logisticsSubTab==='FINAL'?'bg-blue-100 text-blue-800':'text-slate-400 hover:text-blue-600'}`}>Costos Finales</button></div></div>
-                                    {logisticsSubTab === 'INITIAL' && (<form onSubmit={handleUpdateLogisticsInitial} className="p-6">{isConsolidationMode && (<div className="bg-blue-100 border-l-4 border-blue-500 text-blue-700 p-3 mb-6 text-sm font-bold flex items-center gap-2"><Layers size={18} /> MODO CONSOLIDACIÓN ACTIVO: Se aplicarán cambios a {consolidationList.length + 1} órdenes.</div>)}<div className="grid grid-cols-2 gap-6 mb-6"><EditableField label="Tracking Number" name="tracking_number" value={selectedAsset.logistics.tracking_number} disabled={!canEditLogistics} /><EditableField label="Courier / Forwarder" name="courier" value={selectedAsset.logistics.courier} disabled={!canEditLogistics} /></div>{canEditLogistics && (<div className="flex justify-end border-t pt-4"><button className="bg-blue-600 text-white px-6 py-2 rounded font-bold hover:bg-blue-700 flex items-center gap-2 shadow-sm text-sm"><Save size={16}/> {isConsolidationMode ? `Guardar Consolidación` : "Guardar Datos Logísticos"}</button></div>)}</form>)}
-                                    {logisticsSubTab === 'FINAL' && (<form onSubmit={handleUpdateLogisticsFinal} className="p-4 text-sm"><div className="grid grid-cols-4 gap-4 mb-4 bg-slate-50 p-4 rounded border"><div className="col-span-1 space-y-1"><label className="text-[10px] font-bold text-slate-500 uppercase">Fecha Llegada</label><input type="date" name="fecha_llegada_almacen" defaultValue={selectedAsset.metadata.cost_breakdown?.fecha_llegada_almacen} className="border p-1 w-full bg-white rounded text-xs"/></div><div className="col-span-1 space-y-1"><label className="text-[10px] font-bold text-slate-500 uppercase">No. Liquidación</label><input name="no_liquidacion" defaultValue={selectedAsset.metadata.cost_breakdown?.no_liquidacion} className="border p-1 w-full bg-white rounded text-xs"/></div></div><div className="grid grid-cols-12 gap-6"><div className="col-span-3 space-y-2"><h4 className="font-bold text-orange-800 text-xs uppercase border-b border-orange-200 pb-1 mb-2">Gastos Locales (Global)</h4><LocalExpenseInput label="Manejo Carga" val={localExpenses.manejo_carga} onChange={(v)=>setLocalExpenses({...localExpenses, manejo_carga: v})} /><LocalExpenseInput label="Costo CC" val={localExpenses.costo_cc} onChange={(v)=>setLocalExpenses({...localExpenses, costo_cc: v})} /><LocalExpenseInput label="Almacenaje" val={localExpenses.almacenaje} onChange={(v)=>setLocalExpenses({...localExpenses, almacenaje: v})} /><LocalExpenseInput label="Asesoria" val={localExpenses.asesoria_gestion_riesgo} onChange={(v)=>setLocalExpenses({...localExpenses, asesoria_gestion_riesgo: v})} /><LocalExpenseInput label="Transporte" val={localExpenses.transporte_local} onChange={(v)=>setLocalExpenses({...localExpenses, transporte_local: v})} /><LocalExpenseInput label="Agenciamiento" val={localExpenses.agenciamiento_aduana} onChange={(v)=>setLocalExpenses({...localExpenses, agenciamiento_aduana: v})} /></div><div className="col-span-9 overflow-x-auto"><div className="flex justify-between items-center mb-2"><h4 className="font-bold text-blue-900 text-xs uppercase">Desglose de Costos (Items)</h4><div className="flex gap-2">{canEditLogistics && (<button type="button" onClick={handleManualReloadItems} className="text-xs bg-slate-100 text-slate-600 px-3 py-1.5 rounded hover:bg-slate-200 flex items-center gap-1 font-bold shadow-sm" title="Recargar desde la orden original"><RefreshCw size={14}/> Recargar desde Orden</button>)}{canEditLogistics && (<button type="button" onClick={addItemRow} className="text-xs bg-blue-100 text-blue-700 px-3 py-1.5 rounded hover:bg-blue-200 flex items-center gap-1 font-bold shadow-sm"><Plus size={14}/> Agregar Item</button>)}</div></div><table className="w-full text-xs border-separate border-spacing-0 border border-slate-200 rounded-lg overflow-hidden"><thead className="bg-slate-50 text-slate-600 uppercase font-bold tracking-tight"><tr><th className="p-3 border-b border-r text-center w-8">#</th><th className="p-3 border-b border-r text-left bg-yellow-50/50">Factura</th><th className="p-3 border-b border-r text-left bg-yellow-50/50 min-w-[140px]">Item / Desc</th><th className="p-3 border-b border-r text-center bg-yellow-50/50 w-12">Qty</th><th className="p-3 border-b border-r text-right bg-yellow-50/50">Precio U.</th><th className="p-3 border-b border-r text-right bg-slate-100 text-slate-500">Total $</th><th className="p-3 border-b border-r text-right bg-yellow-50/50">CIF (Unit)</th><th className="p-3 border-b border-r text-center w-8">Aran?</th><th className="p-3 border-b border-r text-right text-slate-500">Arancel</th><th className="p-3 border-b border-r text-right text-slate-500">Fodinfa</th><th className="p-3 border-b border-r text-right text-slate-500">IVA 15%</th><th className="p-3 border-b border-r text-right font-bold text-slate-700">Liq. Total</th><th className="p-3 border-b border-r text-right text-orange-700 font-bold">Locales</th><th className="p-3 border-b border-r text-right bg-blue-50 text-blue-900 font-bold">Costo Final</th><th className="p-3 border-b border-r text-right bg-blue-100 text-blue-900 font-bold">Landed</th><th className="p-3 border-b w-8"></th></tr></thead><tbody className="bg-white divide-y divide-slate-100">{itemsState.map((item, idx) => { const totalPrice = item.cantidad * item.precio_uni; const arancelVal = item.aplica_arancel ? item.cif_unitario * 0.05 : 0; const fodinfaVal = item.cif_unitario * 0.005; const baseIva = item.cif_unitario + arancelVal + fodinfaVal; const ivaVal = baseIva * 0.15; const totalLiq = arancelVal + fodinfaVal + ivaVal; const finalCost = item.cif_unitario + totalLiq + proratedLocalPerItem; const landedFactor = item.precio_uni > 0 ? (finalCost / item.precio_uni) : 0; return (<tr key={item.id} className="hover:bg-slate-50"><td className="p-2 border-r text-center text-slate-400 font-medium">{idx + 1}</td><td className="p-2 border-r"><input className="w-full bg-yellow-50 border border-transparent hover:border-slate-300 rounded px-1 py-0.5 text-center focus:ring-1 focus:ring-blue-200 focus:bg-white transition-all" value={item.no_factura} onChange={(e)=>handleItemChange(item.id, 'no_factura', e.target.value)}/></td><td className="p-2 border-r"><input className="w-full bg-yellow-50 font-bold text-xs border border-transparent hover:border-slate-300 rounded px-1 py-0.5 mb-1 focus:ring-1 focus:ring-blue-200 focus:bg-white" value={item.item_number} onChange={(e)=>handleItemChange(item.id, 'item_number', e.target.value)}/><input className="w-full bg-yellow-50 text-[10px] text-slate-500 border border-transparent hover:border-slate-300 rounded px-1 py-0.5 focus:ring-1 focus:ring-blue-200 focus:bg-white" value={item.descripcion} onChange={(e)=>handleItemChange(item.id, 'descripcion', e.target.value)}/></td><td className="p-2 border-r"><input type="number" className="w-full text-center bg-yellow-50 border border-transparent hover:border-slate-300 rounded px-1 py-0.5 focus:ring-1 focus:ring-blue-200 focus:bg-white" value={item.cantidad} onChange={(e)=>handleItemChange(item.id, 'cantidad', Number(e.target.value))}/></td><td className="p-2 border-r"><input type="number" step="0.01" className="w-full text-right bg-yellow-50 border border-transparent hover:border-slate-300 rounded px-1 py-0.5 focus:ring-1 focus:ring-blue-200 focus:bg-white" value={item.precio_uni} onChange={(e)=>handleItemChange(item.id, 'precio_uni', Number(e.target.value))}/></td><td className="p-2 border-r text-right font-mono text-slate-500 bg-slate-50/50">{totalPrice.toFixed(2)}</td><td className="p-2 border-r"><input type="number" step="0.01" className="w-full text-right bg-yellow-50 font-bold text-slate-700 border border-transparent hover:border-slate-300 rounded px-1 py-0.5 focus:ring-1 focus:ring-blue-200 focus:bg-white" value={item.cif_unitario} onChange={(e)=>handleItemChange(item.id, 'cif_unitario', Number(e.target.value))}/></td><td className="p-2 border-r text-center"><input type="checkbox" className="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500" checked={item.aplica_arancel} onChange={(e)=>handleItemChange(item.id, 'aplica_arancel', e.target.checked)}/></td><td className="p-2 border-r text-right text-slate-500 text-[11px]">{arancelVal.toFixed(2)}</td><td className="p-2 border-r text-right text-slate-500 text-[11px]">{fodinfaVal.toFixed(2)}</td><td className="p-2 border-r text-right text-slate-500 text-[11px]">{ivaVal.toFixed(2)}</td><td className="p-2 border-r text-right font-bold text-slate-800 bg-slate-50">{totalLiq.toFixed(2)}</td><td className="p-2 border-r text-right text-orange-600 font-medium">{proratedLocalPerItem.toFixed(2)}</td><td className="p-2 border-r text-right font-bold bg-blue-50 text-blue-900 text-sm">{finalCost.toFixed(2)}</td><td className="p-2 border-r text-right font-bold bg-blue-100 text-blue-900">{landedFactor.toFixed(3)}</td><td className="p-2 text-center">{canEditLogistics && <button type="button" onClick={()=>removeItemRow(item.id)} className="text-red-300 hover:text-red-500 hover:bg-red-50 p-1 rounded transition-colors"><Trash2 size={14}/></button>}</td></tr>); })}</tbody></table></div></div><div className="mt-6 flex justify-between items-center border-t border-slate-200 pt-6"><div className="flex items-center gap-3 bg-emerald-50 px-4 py-2 rounded-lg border border-emerald-100"><input type="checkbox" name="importacion_procesada" defaultChecked={selectedAsset.logistics.importacion_procesada} className="w-5 h-5 text-emerald-600 rounded focus:ring-emerald-500 border-gray-300"/><div><label className="text-sm font-bold text-emerald-900 block">Finalizar Importación</label><span className="text-[10px] text-emerald-700 block">Marcar para enviar activo a proceso de Aduanas.</span></div></div>{canEditLogistics && <button type="submit" className="bg-emerald-600 text-white px-6 py-2.5 rounded-lg font-bold hover:bg-emerald-700 flex items-center gap-2 shadow-lg hover:shadow-xl transition-all active:scale-95"><Save size={18}/> Guardar Costos Finales</button>}</div></form>)}</div></div></div>)}</div>)}
+                                    <div className="bg-slate-50 px-4 py-3 border-b border-slate-200"><h3 className="font-bold text-slate-700 flex items-center gap-2 text-sm"><ShoppingCart size={16} className="text-indigo-500"/> 1. Datos de Solicitud (Origen)</h3></div>
+                                    <div className="p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 md:gap-6 text-sm">
+                                        <InfoField label="Proveedor" value={selectedAsset.metadata.provider} />
+                                        <InfoField label="Cliente Final" value={selectedAsset.metadata.cliente_final} />
+                                        <InfoField label="Equipo Destino" value={selectedAsset.metadata.equipo_destino} />
+                                        <InfoField label="Condición" value={selectedAsset.metadata.condicion} />
+                                    </div>
+                                </div>
+                                <div className="bg-white rounded-lg shadow-md border border-slate-200 overflow-hidden">
+                                    <div className="bg-blue-50 px-4 py-3 border-b border-blue-100 flex flex-wrap justify-between items-center gap-2">
+                                        <h3 className="font-bold text-blue-900 flex items-center gap-2 text-sm"><Truck size={16} className="text-blue-600"/> 2. Gestión Logística</h3>
+                                        <div className="flex gap-2 bg-white rounded p-0.5 border border-blue-100">
+                                            <button onClick={()=>setLogisticsSubTab('INITIAL')} className={`px-3 py-1 text-xs font-bold rounded transition-colors ${logisticsSubTab==='INITIAL'?'bg-blue-100 text-blue-800':'text-slate-400 hover:text-blue-600'}`}>Tracking</button>
+                                            <button onClick={handleGoToClosing} className={`px-3 py-1 text-xs font-bold rounded transition-colors ${logisticsSubTab==='FINAL'?'bg-blue-100 text-blue-800':'text-slate-400 hover:text-blue-600'}`}>Costos Finales</button>
+                                        </div>
+                                    </div>
+                                    {logisticsSubTab === 'INITIAL' && (<form onSubmit={handleUpdateLogisticsInitial} className="p-6">{isConsolidationMode && (<div className="bg-blue-100 border-l-4 border-blue-500 text-blue-700 p-3 mb-6 text-sm font-bold flex items-center gap-2"><Layers size={18} /> MODO CONSOLIDACIÓN ACTIVO: Se aplicarán cambios a {consolidationList.length + 1} órdenes.</div>)}<div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6"><EditableField label="Tracking Number" name="tracking_number" value={selectedAsset.logistics.tracking_number} disabled={!canEditLogistics} /><EditableField label="Courier / Forwarder" name="courier" value={selectedAsset.logistics.courier} disabled={!canEditLogistics} /></div>{canEditLogistics && (<div className="flex justify-end border-t pt-4"><button className="bg-blue-600 text-white px-6 py-2 rounded font-bold hover:bg-blue-700 flex items-center gap-2 shadow-sm text-sm"><Save size={16}/> {isConsolidationMode ? `Guardar Consolidación` : "Guardar Datos Logísticos"}</button></div>)}</form>)}
+                                    {logisticsSubTab === 'FINAL' && (
+                                        <form onSubmit={handleUpdateLogisticsFinal} className="p-4 text-sm">
+                                            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4 bg-slate-50 p-4 rounded border">
+                                                <div className="col-span-1 space-y-1"><label className="text-[10px] font-bold text-slate-500 uppercase">Fecha Llegada</label><input type="date" name="fecha_llegada_almacen" defaultValue={selectedAsset.metadata.cost_breakdown?.fecha_llegada_almacen} className="border p-1 w-full bg-white rounded text-xs"/></div>
+                                                <div className="col-span-1 space-y-1"><label className="text-[10px] font-bold text-slate-500 uppercase">No. Liquidación</label><input name="no_liquidacion" defaultValue={selectedAsset.metadata.cost_breakdown?.no_liquidacion} className="border p-1 w-full bg-white rounded text-xs"/></div>
+                                            </div>
+                                            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                                                <div className="lg:col-span-3 space-y-2">
+                                                    <h4 className="font-bold text-orange-800 text-xs uppercase border-b border-orange-200 pb-1 mb-2">Gastos Locales (Global)</h4>
+                                                    <LocalExpenseInput label="Manejo Carga" val={localExpenses.manejo_carga} onChange={(v)=>setLocalExpenses({...localExpenses, manejo_carga: v})} /><LocalExpenseInput label="Costo CC" val={localExpenses.costo_cc} onChange={(v)=>setLocalExpenses({...localExpenses, costo_cc: v})} /><LocalExpenseInput label="Almacenaje" val={localExpenses.almacenaje} onChange={(v)=>setLocalExpenses({...localExpenses, almacenaje: v})} /><LocalExpenseInput label="Asesoria" val={localExpenses.asesoria_gestion_riesgo} onChange={(v)=>setLocalExpenses({...localExpenses, asesoria_gestion_riesgo: v})} /><LocalExpenseInput label="Transporte" val={localExpenses.transporte_local} onChange={(v)=>setLocalExpenses({...localExpenses, transporte_local: v})} /><LocalExpenseInput label="Agenciamiento" val={localExpenses.agenciamiento_aduana} onChange={(v)=>setLocalExpenses({...localExpenses, agenciamiento_aduana: v})} />
+                                                </div>
+                                                <div className="lg:col-span-9 overflow-x-auto">
+                                                    <div className="flex justify-between items-center mb-2 min-w-[600px]"><h4 className="font-bold text-blue-900 text-xs uppercase">Desglose de Costos (Items)</h4><div className="flex gap-2">{canEditLogistics && (<button type="button" onClick={handleManualReloadItems} className="text-xs bg-slate-100 text-slate-600 px-3 py-1.5 rounded hover:bg-slate-200 flex items-center gap-1 font-bold shadow-sm" title="Recargar desde la orden original"><RefreshCw size={14}/> Recargar desde Orden</button>)}{canEditLogistics && (<button type="button" onClick={addItemRow} className="text-xs bg-blue-100 text-blue-700 px-3 py-1.5 rounded hover:bg-blue-200 flex items-center gap-1 font-bold shadow-sm"><Plus size={14}/> Agregar Item</button>)}</div></div>
+                                                    <table className="w-full text-xs border-separate border-spacing-0 border border-slate-200 rounded-lg overflow-hidden min-w-[900px]">
+                                                        <thead className="bg-slate-50 text-slate-600 uppercase font-bold tracking-tight"><tr><th className="p-3 border-b border-r text-center w-8">#</th><th className="p-3 border-b border-r text-left bg-yellow-50/50">Factura</th><th className="p-3 border-b border-r text-left bg-yellow-50/50 min-w-[140px]">Item / Desc</th><th className="p-3 border-b border-r text-center bg-yellow-50/50 w-12">Qty</th><th className="p-3 border-b border-r text-right bg-yellow-50/50">Precio U.</th><th className="p-3 border-b border-r text-right bg-slate-100 text-slate-500">Total $</th><th className="p-3 border-b border-r text-right bg-yellow-50/50">CIF (Unit)</th><th className="p-3 border-b border-r text-center w-8">Aran?</th><th className="p-3 border-b border-r text-right text-slate-500">Arancel</th><th className="p-3 border-b border-r text-right text-slate-500">Fodinfa</th><th className="p-3 border-b border-r text-right text-slate-500">IVA 15%</th><th className="p-3 border-b border-r text-right font-bold text-slate-700">Liq. Total</th><th className="p-3 border-b border-r text-right text-orange-700 font-bold">Locales</th><th className="p-3 border-b border-r text-right bg-blue-50 text-blue-900 font-bold">Costo Final</th><th className="p-3 border-b border-r text-right bg-blue-100 text-blue-900 font-bold">Landed</th><th className="p-3 border-b w-8"></th></tr></thead>
+                                                        <tbody className="bg-white divide-y divide-slate-100">{itemsState.map((item, idx) => { const totalPrice = item.cantidad * item.precio_uni; const arancelVal = item.aplica_arancel ? item.cif_unitario * 0.05 : 0; const fodinfaVal = item.cif_unitario * 0.005; const baseIva = item.cif_unitario + arancelVal + fodinfaVal; const ivaVal = baseIva * 0.15; const totalLiq = arancelVal + fodinfaVal + ivaVal; const finalCost = item.cif_unitario + totalLiq + proratedLocalPerItem; const landedFactor = item.precio_uni > 0 ? (finalCost / item.precio_uni) : 0; return (<tr key={item.id} className="hover:bg-slate-50"><td className="p-2 border-r text-center text-slate-400 font-medium">{idx + 1}</td><td className="p-2 border-r"><input className="w-full bg-yellow-50 border border-transparent hover:border-slate-300 rounded px-1 py-0.5 text-center focus:ring-1 focus:ring-blue-200 focus:bg-white transition-all" value={item.no_factura} onChange={(e)=>handleItemChange(item.id, 'no_factura', e.target.value)}/></td><td className="p-2 border-r"><input className="w-full bg-yellow-50 font-bold text-xs border border-transparent hover:border-slate-300 rounded px-1 py-0.5 mb-1 focus:ring-1 focus:ring-blue-200 focus:bg-white" value={item.item_number} onChange={(e)=>handleItemChange(item.id, 'item_number', e.target.value)}/><input className="w-full bg-yellow-50 text-[10px] text-slate-500 border border-transparent hover:border-slate-300 rounded px-1 py-0.5 focus:ring-1 focus:ring-blue-200 focus:bg-white" value={item.descripcion} onChange={(e)=>handleItemChange(item.id, 'descripcion', e.target.value)}/></td><td className="p-2 border-r"><input type="number" className="w-full text-center bg-yellow-50 border border-transparent hover:border-slate-300 rounded px-1 py-0.5 focus:ring-1 focus:ring-blue-200 focus:bg-white" value={item.cantidad} onChange={(e)=>handleItemChange(item.id, 'cantidad', Number(e.target.value))}/></td><td className="p-2 border-r"><input type="number" step="0.01" className="w-full text-right bg-yellow-50 border border-transparent hover:border-slate-300 rounded px-1 py-0.5 focus:ring-1 focus:ring-blue-200 focus:bg-white" value={item.precio_uni} onChange={(e)=>handleItemChange(item.id, 'precio_uni', Number(e.target.value))}/></td><td className="p-2 border-r text-right font-mono text-slate-500 bg-slate-50/50">{totalPrice.toFixed(2)}</td><td className="p-2 border-r"><input type="number" step="0.01" className="w-full text-right bg-yellow-50 font-bold text-slate-700 border border-transparent hover:border-slate-300 rounded px-1 py-0.5 focus:ring-1 focus:ring-blue-200 focus:bg-white" value={item.cif_unitario} onChange={(e)=>handleItemChange(item.id, 'cif_unitario', Number(e.target.value))}/></td><td className="p-2 border-r text-center"><input type="checkbox" className="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500" checked={item.aplica_arancel} onChange={(e)=>handleItemChange(item.id, 'aplica_arancel', e.target.checked)}/></td><td className="p-2 border-r text-right text-slate-500 text-[11px]">{arancelVal.toFixed(2)}</td><td className="p-2 border-r text-right text-slate-500 text-[11px]">{fodinfaVal.toFixed(2)}</td><td className="p-2 border-r text-right text-slate-500 text-[11px]">{ivaVal.toFixed(2)}</td><td className="p-2 border-r text-right font-bold text-slate-800 bg-slate-50">{totalLiq.toFixed(2)}</td><td className="p-2 border-r text-right text-orange-600 font-medium">{proratedLocalPerItem.toFixed(2)}</td><td className="p-2 border-r text-right font-bold bg-blue-50 text-blue-900 text-sm">{finalCost.toFixed(2)}</td><td className="p-2 border-r text-right font-bold bg-blue-100 text-blue-900">{landedFactor.toFixed(3)}</td><td className="p-2 text-center">{canEditLogistics && <button type="button" onClick={()=>removeItemRow(item.id)} className="text-red-300 hover:text-red-500 hover:bg-red-50 p-1 rounded transition-colors"><Trash2 size={14}/></button>}</td></tr>); })}</tbody></table>
+                                                </div>
+                                            </div>
+                                            <div className="mt-6 flex flex-col md:flex-row justify-between items-center border-t border-slate-200 pt-6 gap-4">
+                                                <div className="flex items-center gap-3 bg-emerald-50 px-4 py-2 rounded-lg border border-emerald-100 w-full md:w-auto">
+                                                    <input type="checkbox" name="importacion_procesada" defaultChecked={selectedAsset.logistics.importacion_procesada} className="w-5 h-5 text-emerald-600 rounded focus:ring-emerald-500 border-gray-300"/>
+                                                    <div><label className="text-sm font-bold text-emerald-900 block">Finalizar Importación</label><span className="text-[10px] text-emerald-700 block">Marcar para enviar activo a proceso de Aduanas.</span></div>
+                                                </div>
+                                                {canEditLogistics && <button type="submit" className="w-full md:w-auto bg-emerald-600 text-white px-6 py-2.5 rounded-lg font-bold hover:bg-emerald-700 flex items-center justify-center gap-2 shadow-lg hover:shadow-xl transition-all active:scale-95"><Save size={18}/> Guardar Costos Finales</button>}
+                                            </div>
+                                        </form>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            )}
             {activeTab === 'DOCS' && ( 
                 /* ... Docs Content ... */ 
                 <div className="max-w-5xl mx-auto space-y-6">
                     {!selectedAssetId ? (
                         <div className="space-y-6">
-                            <div className="bg-white rounded-lg shadow-md p-8 text-center border-b-4 border-indigo-500">
+                            <div className="bg-white rounded-lg shadow-md p-6 md:p-8 text-center border-b-4 border-indigo-500">
                                 <h2 className="text-2xl font-bold text-slate-800">Gestión Documental</h2>
-                                <p className="text-slate-500 mt-2">Seleccione una Orden GE para administrar sus documentos de importación.</p>
+                                <p className="text-slate-500 mt-2">Seleccione una Orden GE para administrar sus documentos.</p>
                             </div>
                             
                             {/* Search Bar */}
@@ -1334,7 +1395,7 @@ export default function App() {
                                 <Search className="absolute left-3 top-2.5 text-slate-400" size={18} />
                                 <input 
                                     type="text" 
-                                    placeholder="Buscar por Orden, Descripción o ID..." 
+                                    placeholder="Buscar por Orden..." 
                                     value={docSearchTerm}
                                     onChange={(e) => setDocSearchTerm(e.target.value)}
                                     className="w-full pl-10 pr-4 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-100 outline-none bg-white shadow-sm"
@@ -1343,71 +1404,70 @@ export default function App() {
 
                             {/* Orders Table View */}
                             <div className="bg-white rounded-lg shadow border border-slate-200 overflow-hidden">
-                                <table className="w-full text-sm text-left">
-                                    <thead className="bg-slate-50 text-slate-500 uppercase text-xs">
-                                        <tr>
-                                            <th className="p-4">Orden</th>
-                                            <th className="p-4">Descripción / Proyecto</th>
-                                            <th className="p-4">Fecha Solicitud</th>
-                                            <th className="p-4 text-center">Total Docs</th>
-                                            <th className="p-4 text-center">Acciones</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody className="divide-y divide-slate-100">
-                                        {(Object.entries(assetsByOrder) as [string, Asset[]][])
-                                            .filter(([orderId, group]) => {
-                                                const search = docSearchTerm.toLowerCase();
-                                                const mainAsset = group[0];
-                                                return orderId.toLowerCase().includes(search) || 
-                                                       mainAsset.metadata.description.toLowerCase().includes(search) ||
-                                                       (mainAsset.metadata.workflow_id && mainAsset.metadata.workflow_id.toLowerCase().includes(search));
-                                            })
-                                            .map(([orderId, group]) => {
-                                                const mainAsset = group[0];
-                                                const docCount = mainAsset.logistics.extra_docs?.length || 0;
-                                                return (
-                                                    <tr key={orderId} className="hover:bg-slate-50 transition-colors group">
-                                                        <td className="p-4">
-                                                            <div className="font-bold text-slate-700 flex items-center gap-2">
-                                                                <FolderOpen size={16} className="text-indigo-500"/>
-                                                                {orderId}
-                                                            </div>
-                                                            <div className="text-[10px] text-slate-400 pl-6">{mainAsset.metadata.workflow_id}</div>
-                                                        </td>
-                                                        <td className="p-4">
-                                                            <div className="text-slate-600 font-medium truncate max-w-xs">{mainAsset.metadata.description}</div>
-                                                            <div className="text-[10px] text-slate-400">{group.length} Items en orden</div>
-                                                        </td>
-                                                        <td className="p-4 text-slate-500 font-mono text-xs">
-                                                            {new Date(mainAsset.metadata.fecha_solicitud).toLocaleDateString()}
-                                                        </td>
-                                                        <td className="p-4 text-center">
-                                                            <span className={`px-2 py-1 rounded text-xs font-bold ${docCount > 0 ? 'bg-indigo-100 text-indigo-700' : 'bg-slate-100 text-slate-400'}`}>
-                                                                {docCount}
-                                                            </span>
-                                                        </td>
-                                                        <td className="p-4 text-center">
-                                                            <button 
-                                                                onClick={() => setSelectedAssetId(mainAsset.id)}
-                                                                className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-full transition-colors"
-                                                                title="Ver Documentos"
-                                                            >
-                                                                <ArrowRight size={18} />
-                                                            </button>
-                                                        </td>
-                                                    </tr>
-                                                );
-                                            })}
-                                    </tbody>
-                                </table>
-                                {(Object.entries(assetsByOrder).length === 0) && (
-                                    <div className="p-8 text-center text-slate-400">No hay órdenes registradas.</div>
-                                )}
+                                <div className="overflow-x-auto">
+                                    <table className="w-full text-sm text-left min-w-[600px]">
+                                        <thead className="bg-slate-50 text-slate-500 uppercase text-xs">
+                                            <tr>
+                                                <th className="p-4">Orden</th>
+                                                <th className="p-4">Descripción</th>
+                                                <th className="p-4">Fecha Solicitud</th>
+                                                <th className="p-4 text-center">Docs</th>
+                                                <th className="p-4 text-center">Acciones</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-slate-100">
+                                            {(Object.entries(assetsByOrder) as [string, Asset[]][])
+                                                .filter(([orderId, group]) => {
+                                                    const search = docSearchTerm.toLowerCase();
+                                                    const mainAsset = group[0];
+                                                    return orderId.toLowerCase().includes(search) || 
+                                                           mainAsset.metadata.description.toLowerCase().includes(search) ||
+                                                           (mainAsset.metadata.workflow_id && mainAsset.metadata.workflow_id.toLowerCase().includes(search));
+                                                })
+                                                .map(([orderId, group]) => {
+                                                    const mainAsset = group[0];
+                                                    const docCount = mainAsset.logistics.extra_docs?.length || 0;
+                                                    return (
+                                                        <tr key={orderId} className="hover:bg-slate-50 transition-colors group">
+                                                            <td className="p-4">
+                                                                <div className="font-bold text-slate-700 flex items-center gap-2">
+                                                                    <FolderOpen size={16} className="text-indigo-500"/>
+                                                                    {orderId}
+                                                                </div>
+                                                                <div className="text-[10px] text-slate-400 pl-6">{mainAsset.metadata.workflow_id}</div>
+                                                            </td>
+                                                            <td className="p-4">
+                                                                <div className="text-slate-600 font-medium truncate max-w-xs">{mainAsset.metadata.description}</div>
+                                                                <div className="text-[10px] text-slate-400">{group.length} Items en orden</div>
+                                                            </td>
+                                                            <td className="p-4 text-slate-500 font-mono text-xs">
+                                                                {new Date(mainAsset.metadata.fecha_solicitud).toLocaleDateString()}
+                                                            </td>
+                                                            <td className="p-4 text-center">
+                                                                <span className={`px-2 py-1 rounded text-xs font-bold ${docCount > 0 ? 'bg-indigo-100 text-indigo-700' : 'bg-slate-100 text-slate-400'}`}>
+                                                                    {docCount}
+                                                                </span>
+                                                            </td>
+                                                            <td className="p-4 text-center">
+                                                                <button 
+                                                                    onClick={() => setSelectedAssetId(mainAsset.id)}
+                                                                    className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-full transition-colors"
+                                                                    title="Ver Documentos"
+                                                                >
+                                                                    <ArrowRight size={18} />
+                                                                </button>
+                                                            </td>
+                                                        </tr>
+                                                    );
+                                                })}
+                                        </tbody>
+                                    </table>
+                                </div>
                             </div>
                         </div>
                     ) : (
                         /* Existing Document Detail View (Kept as is) */
-                        <div className="bg-white rounded-lg shadow-lg border border-slate-200 flex flex-col h-[calc(100vh-140px)]"><div className="bg-indigo-900 text-white p-6 flex justify-between items-center"><div><button onClick={() => setSelectedAssetId(null)} className="text-xs text-indigo-300 hover:text-white flex items-center gap-1 mb-2 transition-colors"><ChevronLeft size={14}/> Volver</button><h2 className="text-xl font-bold flex items-center gap-2"><FolderOpen className="text-indigo-400"/>Repositorio: {selectedAsset?.metadata.numero_orden_ge}</h2></div><div className="bg-white/10 px-4 py-2 rounded-lg backdrop-blur-sm"><div className="text-xs text-indigo-200 uppercase font-bold">Total Documentos</div><div className="text-xl font-bold">{selectedAsset?.logistics.extra_docs?.length || 0}</div></div></div><div className="flex-1 overflow-auto p-6">{(!selectedAsset?.logistics.extra_docs || selectedAsset.logistics.extra_docs.length === 0) && (<div className="h-full flex flex-col items-center justify-center text-slate-400 border-2 border-dashed border-slate-200 rounded-xl m-4"><FileText size={48} className="mb-4 text-slate-300"/><p>No hay documentos cargados para esta orden.</p></div>)}<div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">{selectedAsset?.logistics.extra_docs?.map((doc) => (<div key={doc.id} className="bg-white p-4 rounded-lg border border-slate-200 shadow-sm hover:shadow-md transition-shadow group relative"><div className="flex items-start gap-3"><div className="bg-red-50 text-red-600 p-2.5 rounded-lg"><FileText size={20} /></div><div className="flex-1 min-w-0"><h4 className="font-bold text-slate-700 text-sm truncate">{doc.name}</h4><p className="text-xs text-slate-500 truncate mb-1">{doc.filename}</p><div className="flex items-center gap-2 mt-2"><span className="text-[10px] bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded">{new Date(doc.date).toLocaleDateString()}</span><span className="text-[10px] text-slate-400">by {doc.uploaded_by}</span></div></div></div><div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity flex gap-1"><button className="p-1.5 bg-blue-50 text-blue-600 rounded hover:bg-blue-100" title="Descargar"><Download size={14}/></button><button onClick={()=>handleDeleteDoc(doc.id)} className="p-1.5 bg-red-50 text-red-600 rounded hover:bg-red-100" title="Eliminar"><Trash2 size={14}/></button></div></div>))}</div></div><div className="p-6 bg-slate-50 border-t border-slate-200"><form onSubmit={handleUploadDoc} className="flex gap-4 items-end"><div className="flex-1"><label className="text-xs font-bold text-slate-500 uppercase block mb-1">Nombre del Documento</label><input type="text" value={docName} onChange={(e)=>setDocName(e.target.value)} placeholder="Ej. Factura Comercial, Packing List..." className="w-full border border-slate-300 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-indigo-100 outline-none" required /></div><div className="flex-1"><label className="text-xs font-bold text-slate-500 uppercase block mb-1">Archivo</label><div className="relative"><input type="file" onChange={(e)=>setDocFile(e.target.files ? e.target.files[0] : null)} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" required /><div className="w-full border border-slate-300 bg-white rounded-lg p-2.5 text-sm text-slate-500 flex items-center gap-2"><Paperclip size={16}/><span className="truncate">{docFile ? docFile.name : 'Seleccionar archivo...'}</span></div></div></div><button type="submit" className="bg-indigo-600 text-white px-6 py-2.5 rounded-lg font-bold hover:bg-indigo-700 flex items-center gap-2 shadow-lg transition-transform active:scale-95 mb-[1px]"><UploadCloud size={18}/> Subir</button></form></div></div>
+                        <div className="bg-white rounded-lg shadow-lg border border-slate-200 flex flex-col h-[calc(100vh-140px)]"><div className="bg-indigo-900 text-white p-6 flex justify-between items-center"><div><button onClick={() => setSelectedAssetId(null)} className="text-xs text-indigo-300 hover:text-white flex items-center gap-1 mb-2 transition-colors"><ChevronLeft size={14}/> Volver</button><h2 className="text-xl font-bold flex items-center gap-2"><FolderOpen className="text-indigo-400"/>Repositorio: {selectedAsset?.metadata.numero_orden_ge}</h2></div><div className="bg-white/10 px-4 py-2 rounded-lg backdrop-blur-sm hidden md:block"><div className="text-xs text-indigo-200 uppercase font-bold">Total Documentos</div><div className="text-xl font-bold">{selectedAsset?.logistics.extra_docs?.length || 0}</div></div></div><div className="flex-1 overflow-auto p-6">{(!selectedAsset?.logistics.extra_docs || selectedAsset.logistics.extra_docs.length === 0) && (<div className="h-full flex flex-col items-center justify-center text-slate-400 border-2 border-dashed border-slate-200 rounded-xl m-4"><FileText size={48} className="mb-4 text-slate-300"/><p>No hay documentos cargados para esta orden.</p></div>)}<div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">{selectedAsset?.logistics.extra_docs?.map((doc) => (<div key={doc.id} className="bg-white p-4 rounded-lg border border-slate-200 shadow-sm hover:shadow-md transition-shadow group relative"><div className="flex items-start gap-3"><div className="bg-red-50 text-red-600 p-2.5 rounded-lg"><FileText size={20} /></div><div className="flex-1 min-w-0"><h4 className="font-bold text-slate-700 text-sm truncate">{doc.name}</h4><p className="text-xs text-slate-500 truncate mb-1">{doc.filename}</p><div className="flex items-center gap-2 mt-2"><span className="text-[10px] bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded">{new Date(doc.date).toLocaleDateString()}</span><span className="text-[10px] text-slate-400">by {doc.uploaded_by}</span></div></div></div><div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity flex gap-1"><button className="p-1.5 bg-blue-50 text-blue-600 rounded hover:bg-blue-100" title="Descargar"><Download size={14}/></button><button onClick={()=>handleDeleteDoc(doc.id)} className="p-1.5 bg-red-50 text-red-600 rounded hover:bg-red-100" title="Eliminar"><Trash2 size={14}/></button></div></div>))}</div></div><div className="p-6 bg-slate-50 border-t border-slate-200"><form onSubmit={handleUploadDoc} className="flex flex-col md:flex-row gap-4 items-end"><div className="flex-1 w-full"><label className="text-xs font-bold text-slate-500 uppercase block mb-1">Nombre del Documento</label><input type="text" value={docName} onChange={(e)=>setDocName(e.target.value)} placeholder="Ej. Factura Comercial, Packing List..." className="w-full border border-slate-300 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-indigo-100 outline-none" required /></div><div className="flex-1 w-full"><label className="text-xs font-bold text-slate-500 uppercase block mb-1">Archivo</label><div className="relative"><input type="file" onChange={(e)=>setDocFile(e.target.files ? e.target.files[0] : null)} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" required /><div className="w-full border border-slate-300 bg-white rounded-lg p-2.5 text-sm text-slate-500 flex items-center gap-2"><Paperclip size={16}/><span className="truncate">{docFile ? docFile.name : 'Seleccionar archivo...'}</span></div></div></div><button type="submit" className="w-full md:w-auto bg-indigo-600 text-white px-6 py-2.5 rounded-lg font-bold hover:bg-indigo-700 flex items-center justify-center gap-2 shadow-lg transition-transform active:scale-95 mb-[1px]"><UploadCloud size={18}/> Subir</button></form></div></div>
                     )}
                 </div>
             )}
@@ -1416,18 +1476,18 @@ export default function App() {
             {activeTab === 'WAREHOUSE' && (
                 <div className="space-y-6">
                     {/* Sub-Navigation */}
-                    <div className="bg-white p-2 rounded-lg shadow-sm border border-slate-200 flex gap-2">
-                        <button onClick={() => setWarehouseSubTab('ENTRY')} className={`px-4 py-2 rounded text-sm font-bold flex items-center gap-2 ${warehouseSubTab === 'ENTRY' ? 'bg-orange-100 text-orange-800' : 'text-slate-500 hover:bg-slate-50'}`}>
-                            <Truck size={16} /> Recepción / Ingreso
+                    <div className="bg-white p-2 rounded-lg shadow-sm border border-slate-200 flex flex-wrap gap-2">
+                        <button onClick={() => setWarehouseSubTab('ENTRY')} className={`flex-1 md:flex-none px-4 py-2 rounded text-sm font-bold flex items-center justify-center gap-2 ${warehouseSubTab === 'ENTRY' ? 'bg-orange-100 text-orange-800' : 'text-slate-500 hover:bg-slate-50'}`}>
+                            <Truck size={16} /> <span>Recepción</span>
                             {assets.filter(a => [AssetStatus.IN_TRANSIT, AssetStatus.CUSTOMS].includes(a.current_status)).length > 0 && (
                                 <span className="bg-orange-500 text-white text-[10px] px-1.5 rounded-full">{assets.filter(a => [AssetStatus.IN_TRANSIT, AssetStatus.CUSTOMS].includes(a.current_status)).length}</span>
                             )}
                         </button>
-                        <button onClick={() => setWarehouseSubTab('INVENTORY')} className={`px-4 py-2 rounded text-sm font-bold flex items-center gap-2 ${warehouseSubTab === 'INVENTORY' ? 'bg-blue-100 text-blue-800' : 'text-slate-500 hover:bg-slate-50'}`}>
-                            <Layers size={16} /> Inventario Maestro
+                        <button onClick={() => setWarehouseSubTab('INVENTORY')} className={`flex-1 md:flex-none px-4 py-2 rounded text-sm font-bold flex items-center justify-center gap-2 ${warehouseSubTab === 'INVENTORY' ? 'bg-blue-100 text-blue-800' : 'text-slate-500 hover:bg-slate-50'}`}>
+                            <Layers size={16} /> <span>Inventario</span>
                         </button>
-                        <button onClick={() => setWarehouseSubTab('MOVEMENTS')} className={`px-4 py-2 rounded text-sm font-bold flex items-center gap-2 ${warehouseSubTab === 'MOVEMENTS' ? 'bg-purple-100 text-purple-800' : 'text-slate-500 hover:bg-slate-50'}`}>
-                            <ArrowRight size={16} /> Salidas / Movimientos
+                        <button onClick={() => setWarehouseSubTab('MOVEMENTS')} className={`flex-1 md:flex-none px-4 py-2 rounded text-sm font-bold flex items-center justify-center gap-2 ${warehouseSubTab === 'MOVEMENTS' ? 'bg-purple-100 text-purple-800' : 'text-slate-500 hover:bg-slate-50'}`}>
+                            <ArrowRight size={16} /> <span>Salidas</span>
                         </button>
                     </div>
 
@@ -1439,56 +1499,58 @@ export default function App() {
                                     <PackageCheck size={20}/>
                                     Recepción de Mercadería
                                 </h3>
-                                <p className="text-xs text-orange-700 mt-1">Items en tránsito o aduana listos para ingreso a bodega.</p>
+                                <p className="text-xs text-orange-700 mt-1">Items en tránsito o aduana listos para ingreso.</p>
                             </div>
-                            <table className="w-full text-sm text-left">
-                                <thead className="bg-slate-100 text-slate-500 uppercase text-xs">
-                                    <tr>
-                                        <th className="p-4">P/N</th>
-                                        <th className="p-4">Descripción</th>
-                                        <th className="p-4">Orden / Workflow</th>
-                                        <th className="p-4">Cant.</th>
-                                        <th className="p-4 text-center">Acción</th>
-                                    </tr>
-                                </thead>
-                                <tbody className="divide-y divide-slate-100">
-                                    {assets.filter(a => [AssetStatus.IN_TRANSIT, AssetStatus.CUSTOMS].includes(a.current_status)).map(asset => (
-                                        <tr key={asset.id} className="hover:bg-slate-50">
-                                            <td className="p-4 font-bold text-slate-700">{asset.metadata.pn}</td>
-                                            <td className="p-4 text-slate-600">{asset.metadata.description}</td>
-                                            <td className="p-4">
-                                                <div className="text-xs font-bold">{asset.metadata.numero_orden_ge}</div>
-                                                <div className="text-[10px] text-slate-400">{asset.metadata.workflow_id}</div>
-                                            </td>
-                                            <td className="p-4 font-mono">{asset.metadata.cantidad}</td>
-                                            <td className="p-4 text-center">
-                                                {canEditWarehouse && (
-                                                    <button 
-                                                        onClick={() => setReceivingAsset(asset)}
-                                                        className="bg-orange-100 text-orange-700 px-3 py-1.5 rounded hover:bg-orange-200 font-bold text-xs flex items-center gap-1 mx-auto"
-                                                    >
-                                                        <CheckSquare size={14}/> Procesar Ingreso
-                                                    </button>
-                                                )}
-                                            </td>
-                                        </tr>
-                                    ))}
-                                    {assets.filter(a => [AssetStatus.IN_TRANSIT, AssetStatus.CUSTOMS].includes(a.current_status)).length === 0 && (
+                            <div className="overflow-x-auto">
+                                <table className="w-full text-sm text-left min-w-[600px]">
+                                    <thead className="bg-slate-100 text-slate-500 uppercase text-xs">
                                         <tr>
-                                            <td colSpan={5} className="p-8 text-center text-slate-400">
-                                                No hay mercadería pendiente de recepción.
-                                            </td>
+                                            <th className="p-4">P/N</th>
+                                            <th className="p-4">Descripción</th>
+                                            <th className="p-4">Orden / Workflow</th>
+                                            <th className="p-4">Cant.</th>
+                                            <th className="p-4 text-center">Acción</th>
                                         </tr>
-                                    )}
-                                </tbody>
-                            </table>
+                                    </thead>
+                                    <tbody className="divide-y divide-slate-100">
+                                        {assets.filter(a => [AssetStatus.IN_TRANSIT, AssetStatus.CUSTOMS].includes(a.current_status)).map(asset => (
+                                            <tr key={asset.id} className="hover:bg-slate-50">
+                                                <td className="p-4 font-bold text-slate-700">{asset.metadata.pn}</td>
+                                                <td className="p-4 text-slate-600">{asset.metadata.description}</td>
+                                                <td className="p-4">
+                                                    <div className="text-xs font-bold">{asset.metadata.numero_orden_ge}</div>
+                                                    <div className="text-[10px] text-slate-400">{asset.metadata.workflow_id}</div>
+                                                </td>
+                                                <td className="p-4 font-mono">{asset.metadata.cantidad}</td>
+                                                <td className="p-4 text-center">
+                                                    {canEditWarehouse && (
+                                                        <button 
+                                                            onClick={() => setReceivingAsset(asset)}
+                                                            className="bg-orange-100 text-orange-700 px-3 py-1.5 rounded hover:bg-orange-200 font-bold text-xs flex items-center gap-1 mx-auto"
+                                                        >
+                                                            <CheckSquare size={14}/> Procesar Ingreso
+                                                        </button>
+                                                    )}
+                                                </td>
+                                            </tr>
+                                        ))}
+                                        {assets.filter(a => [AssetStatus.IN_TRANSIT, AssetStatus.CUSTOMS].includes(a.current_status)).length === 0 && (
+                                            <tr>
+                                                <td colSpan={5} className="p-8 text-center text-slate-400">
+                                                    No hay mercadería pendiente de recepción.
+                                                </td>
+                                            </tr>
+                                        )}
+                                    </tbody>
+                                </table>
+                            </div>
                         </div>
                     )}
 
                     {/* Modal Recepcion */}
                     {receivingAsset && (
-                        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center backdrop-blur-sm">
-                            <div className="bg-white rounded-xl shadow-2xl w-96 p-6 animate-fadeIn">
+                        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center backdrop-blur-sm p-4">
+                            <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm p-6 animate-fadeIn">
                                 <h3 className="text-lg font-bold text-slate-800 mb-4 flex items-center gap-2">
                                     <MapPin size={20} className="text-orange-500"/>
                                     Ubicación en Bodega
@@ -1501,11 +1563,11 @@ export default function App() {
                                     </div>
                                     <div className="grid grid-cols-2 gap-4 mb-4">
                                         <div>
-                                            <label className="text-xs font-bold text-slate-500 uppercase block mb-1">Pasillo / Aisle</label>
+                                            <label className="text-xs font-bold text-slate-500 uppercase block mb-1">Pasillo</label>
                                             <input name="aisle" className="border rounded w-full p-2" placeholder="Ej. A1" required />
                                         </div>
                                         <div>
-                                            <label className="text-xs font-bold text-slate-500 uppercase block mb-1">Casillero / Bin</label>
+                                            <label className="text-xs font-bold text-slate-500 uppercase block mb-1">Casillero</label>
                                             <input name="bin" className="border rounded w-full p-2" placeholder="Ej. 04" required />
                                         </div>
                                     </div>
@@ -1521,8 +1583,8 @@ export default function App() {
                     {/* INVENTARIO MAESTRO */}
                     {warehouseSubTab === 'INVENTORY' && (
                         <div className="space-y-4">
-                            <div className="flex justify-between items-center bg-white p-4 rounded-lg shadow-sm border border-slate-200">
-                                <div className="relative flex-1 max-w-md">
+                            <div className="flex flex-col md:flex-row justify-between items-center bg-white p-4 rounded-lg shadow-sm border border-slate-200 gap-4">
+                                <div className="relative w-full md:max-w-md">
                                     <Search className="absolute left-3 top-2.5 text-slate-400" size={18} />
                                     <input 
                                         type="text" 
@@ -1532,19 +1594,19 @@ export default function App() {
                                         className="w-full pl-10 pr-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-100 outline-none"
                                     />
                                 </div>
-                                <div className="flex gap-2">
+                                <div className="flex w-full md:w-auto gap-2">
                                     {canEditWarehouse && (
                                         <button 
                                             onClick={handleImportInitialInventory} 
                                             disabled={importing}
-                                            className={`bg-slate-800 text-white px-4 py-2 rounded-lg font-bold text-xs flex items-center gap-2 hover:bg-slate-900 transition-all ${importing ? 'opacity-75 cursor-not-allowed' : ''}`}
+                                            className={`flex-1 bg-slate-800 text-white px-4 py-2 rounded-lg font-bold text-xs flex items-center justify-center gap-2 hover:bg-slate-900 transition-all ${importing ? 'opacity-75 cursor-not-allowed' : ''}`}
                                         >
                                             {importing ? <Loader2 size={16} className="animate-spin"/> : <Database size={16}/>}
                                             {importing ? 'Procesando...' : 'Cargar Init.'}
                                         </button>
                                     )}
                                     {canEditWarehouse && (
-                                        <button onClick={() => setShowAddProductModal(true)} className="bg-blue-600 text-white px-4 py-2 rounded-lg font-bold text-xs flex items-center gap-2 hover:bg-blue-700">
+                                        <button onClick={() => setShowAddProductModal(true)} className="flex-1 bg-blue-600 text-white px-4 py-2 rounded-lg font-bold text-xs flex items-center justify-center gap-2 hover:bg-blue-700">
                                             <Plus size={16}/> Ajuste Manual
                                         </button>
                                     )}
@@ -1552,54 +1614,56 @@ export default function App() {
                             </div>
 
                             <div className="bg-white rounded-lg shadow border border-slate-200 overflow-hidden">
-                                <table className="w-full text-sm text-left">
-                                    <thead className="bg-slate-50 text-slate-500 uppercase text-xs">
-                                        <tr>
-                                            <th className="p-4">SKU / PN</th>
-                                            <th className="p-4">Descripción</th>
-                                            <th className="p-4 text-right">Costo Prom.</th>
-                                            <th className="p-4 text-center">Stock</th>
-                                            <th className="p-4 text-center">Acciones</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody className="divide-y divide-slate-100">
-                                        {inventoryList.map(item => (
-                                            <tr key={item.pn} className="hover:bg-slate-50">
-                                                <td className="p-4 font-mono font-bold text-slate-700">{item.pn}</td>
-                                                <td className="p-4 text-slate-600">
-                                                    <div>{item.description}</div>
-                                                    <div className="text-[10px] text-slate-400 bg-slate-100 inline-block px-1 rounded mt-1">{item.category}</div>
-                                                </td>
-                                                <td className="p-4 text-right font-mono">${item.cost.toFixed(2)}</td>
-                                                <td className="p-4 text-center">
-                                                    <span className={`px-2 py-1 rounded font-bold text-xs ${item.stock > 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-red-50 text-red-400'}`}>
-                                                        {item.stock}
-                                                    </span>
-                                                </td>
-                                                <td className="p-4 text-center">
-                                                    <div className="flex items-center justify-center gap-2">
-                                                        <button 
-                                                            onClick={() => setViewingAssetsItem(item)}
-                                                            className="p-1.5 bg-indigo-50 text-indigo-600 rounded hover:bg-indigo-100 transition-colors"
-                                                            title="Ver Activos / Generar QRs"
-                                                        >
-                                                            <Eye size={16} />
-                                                        </button>
-                                                        {canEditWarehouse && (
-                                                            <button 
-                                                                onClick={() => setEditingItem(item)}
-                                                                className="p-1.5 bg-slate-100 text-slate-600 rounded hover:bg-slate-200 transition-colors"
-                                                                title="Editar Datos del Producto"
-                                                            >
-                                                                <Edit3 size={16} />
-                                                            </button>
-                                                        )}
-                                                    </div>
-                                                </td>
+                                <div className="overflow-x-auto">
+                                    <table className="w-full text-sm text-left min-w-[600px]">
+                                        <thead className="bg-slate-50 text-slate-500 uppercase text-xs">
+                                            <tr>
+                                                <th className="p-4">SKU / PN</th>
+                                                <th className="p-4">Descripción</th>
+                                                <th className="p-4 text-right">Costo Prom.</th>
+                                                <th className="p-4 text-center">Stock</th>
+                                                <th className="p-4 text-center">Acciones</th>
                                             </tr>
-                                        ))}
-                                    </tbody>
-                                </table>
+                                        </thead>
+                                        <tbody className="divide-y divide-slate-100">
+                                            {inventoryList.map(item => (
+                                                <tr key={item.pn} className="hover:bg-slate-50">
+                                                    <td className="p-4 font-mono font-bold text-slate-700">{item.pn}</td>
+                                                    <td className="p-4 text-slate-600">
+                                                        <div>{item.description}</div>
+                                                        <div className="text-[10px] text-slate-400 bg-slate-100 inline-block px-1 rounded mt-1">{item.category}</div>
+                                                    </td>
+                                                    <td className="p-4 text-right font-mono">${item.cost.toFixed(2)}</td>
+                                                    <td className="p-4 text-center">
+                                                        <span className={`px-2 py-1 rounded font-bold text-xs ${item.stock > 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-red-50 text-red-400'}`}>
+                                                            {item.stock}
+                                                        </span>
+                                                    </td>
+                                                    <td className="p-4 text-center">
+                                                        <div className="flex items-center justify-center gap-2">
+                                                            <button 
+                                                                onClick={() => setViewingAssetsItem(item)}
+                                                                className="p-1.5 bg-indigo-50 text-indigo-600 rounded hover:bg-indigo-100 transition-colors"
+                                                                title="Ver Activos / Generar QRs"
+                                                            >
+                                                                <Eye size={16} />
+                                                            </button>
+                                                            {canEditWarehouse && (
+                                                                <button 
+                                                                    onClick={() => setEditingItem(item)}
+                                                                    className="p-1.5 bg-slate-100 text-slate-600 rounded hover:bg-slate-200 transition-colors"
+                                                                    title="Editar Datos del Producto"
+                                                                >
+                                                                    <Edit3 size={16} />
+                                                                </button>
+                                                            )}
+                                                        </div>
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
                             </div>
                         </div>
                     )}
@@ -1647,59 +1711,61 @@ export default function App() {
                                     </h3>
                                     <p className="text-xs text-slate-400 mt-1">Registro de las últimas transacciones de salida de inventario.</p>
                                 </div>
-                                <table className="w-full text-sm text-left">
-                                    <thead className="bg-slate-100 text-slate-500 uppercase text-xs">
-                                        <tr>
-                                            <th className="p-4">Fecha</th>
-                                            <th className="p-4">Item / Descripción</th>
-                                            <th className="p-4 text-center">Cant.</th>
-                                            <th className="p-4">Destino / Motivo</th>
-                                            <th className="p-4">Responsable</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody className="divide-y divide-slate-100">
-                                        {logs
-                                            .filter(l => l.action === 'STATUS_CHANGE' && l.new_value?.current_status === AssetStatus.DISPATCHED)
-                                            .slice(0, 20) // Mostrar solo los ultimos 20 registros
-                                            .map(log => {
-                                                const asset = assets.find(a => a.id === log.asset_id);
-                                                if (!asset) return null;
-                                                return (
-                                                    <tr key={log.id} className="hover:bg-slate-50 transition-colors">
-                                                        <td className="p-4 text-xs font-mono text-slate-500">
-                                                            {new Date(log.timestamp).toLocaleString()}
-                                                        </td>
-                                                        <td className="p-4">
-                                                            <div className="font-bold text-slate-700 text-xs">{asset.metadata.pn}</div>
-                                                            <div className="text-[10px] text-slate-400 truncate max-w-[250px]">{asset.metadata.description}</div>
-                                                        </td>
-                                                        <td className="p-4 text-center">
-                                                            <span className="bg-purple-100 text-purple-700 px-2 py-1 rounded text-xs font-bold">
-                                                                {asset.metadata.cantidad || 1}
-                                                            </span>
-                                                        </td>
-                                                        <td className="p-4">
-                                                            <div className="text-xs font-bold text-slate-700">{asset.warehouse.destino_final || '-'}</div>
-                                                            <div className="text-[10px] text-slate-500">{asset.warehouse.motivo_salida || '-'}</div>
-                                                        </td>
-                                                        <td className="p-4">
-                                                            <div className="flex items-center gap-1.5 text-xs text-slate-600">
-                                                                <UserIcon size={12} className="text-slate-400"/>
-                                                                {asset.warehouse.responsable_egreso || '-'}
-                                                            </div>
-                                                        </td>
-                                                    </tr>
-                                                );
-                                            })}
-                                        {logs.filter(l => l.action === 'STATUS_CHANGE' && l.new_value?.current_status === AssetStatus.DISPATCHED).length === 0 && (
+                                <div className="overflow-x-auto">
+                                    <table className="w-full text-sm text-left min-w-[700px]">
+                                        <thead className="bg-slate-100 text-slate-500 uppercase text-xs">
                                             <tr>
-                                                <td colSpan={5} className="p-8 text-center text-slate-400 text-sm italic">
-                                                    No se han registrado salidas recientemente.
-                                                </td>
+                                                <th className="p-4">Fecha</th>
+                                                <th className="p-4">Item / Descripción</th>
+                                                <th className="p-4 text-center">Cant.</th>
+                                                <th className="p-4">Destino / Motivo</th>
+                                                <th className="p-4">Responsable</th>
                                             </tr>
-                                        )}
-                                    </tbody>
-                                </table>
+                                        </thead>
+                                        <tbody className="divide-y divide-slate-100">
+                                            {logs
+                                                .filter(l => l.action === 'STATUS_CHANGE' && l.new_value?.current_status === AssetStatus.DISPATCHED)
+                                                .slice(0, 20) // Mostrar solo los ultimos 20 registros
+                                                .map(log => {
+                                                    const asset = assets.find(a => a.id === log.asset_id);
+                                                    if (!asset) return null;
+                                                    return (
+                                                        <tr key={log.id} className="hover:bg-slate-50 transition-colors">
+                                                            <td className="p-4 text-xs font-mono text-slate-500">
+                                                                {new Date(log.timestamp).toLocaleString()}
+                                                            </td>
+                                                            <td className="p-4">
+                                                                <div className="font-bold text-slate-700 text-xs">{asset.metadata.pn}</div>
+                                                                <div className="text-[10px] text-slate-400 truncate max-w-[250px]">{asset.metadata.description}</div>
+                                                            </td>
+                                                            <td className="p-4 text-center">
+                                                                <span className="bg-purple-100 text-purple-700 px-2 py-1 rounded text-xs font-bold">
+                                                                    {asset.metadata.cantidad || 1}
+                                                                </span>
+                                                            </td>
+                                                            <td className="p-4">
+                                                                <div className="text-xs font-bold text-slate-700">{asset.warehouse.destino_final || '-'}</div>
+                                                                <div className="text-[10px] text-slate-500">{asset.warehouse.motivo_salida || '-'}</div>
+                                                            </td>
+                                                            <td className="p-4">
+                                                                <div className="flex items-center gap-1.5 text-xs text-slate-600">
+                                                                    <UserIcon size={12} className="text-slate-400"/>
+                                                                    {asset.warehouse.responsable_egreso || '-'}
+                                                                </div>
+                                                            </td>
+                                                        </tr>
+                                                    );
+                                                })}
+                                            {logs.filter(l => l.action === 'STATUS_CHANGE' && l.new_value?.current_status === AssetStatus.DISPATCHED).length === 0 && (
+                                                <tr>
+                                                    <td colSpan={5} className="p-8 text-center text-slate-400 text-sm italic">
+                                                        No se han registrado salidas recientemente.
+                                                    </td>
+                                                </tr>
+                                            )}
+                                        </tbody>
+                                    </table>
+                                </div>
                             </div>
                         </div>
                     )}
@@ -1709,41 +1775,65 @@ export default function App() {
             {/* SCANNER TAB */}
             {activeTab === 'SCANNER' && (
                 <div className="flex flex-col items-center justify-center h-full text-slate-400">
-                    <div className="bg-white p-8 rounded-2xl shadow-xl text-center max-w-sm border border-slate-200">
-                        <ScanLine size={64} className="mx-auto mb-4 text-blue-500 animate-pulse"/>
-                        <h2 className="text-xl font-bold text-slate-800 mb-2">Escáner de Códigos QR</h2>
-                        <p className="text-sm text-slate-500 mb-6">Utilice la cámara de su dispositivo para escanear etiquetas de activos y ver detalles.</p>
-                        <button onClick={handleScanMock} className="bg-slate-900 text-white px-6 py-3 rounded-lg font-bold w-full hover:bg-slate-800 transition-colors">
-                            Simular Escaneo
-                        </button>
-                    </div>
-                    {scannedAsset && (
-                        <div className="mt-8 bg-white p-6 rounded-lg shadow-lg border border-emerald-200 w-full max-w-md animate-fadeIn">
-                            <div className="flex justify-between items-start mb-4">
-                                <h3 className="font-bold text-emerald-700 flex items-center gap-2"><CheckCircle size={18}/> Activo Identificado</h3>
-                                <button onClick={()=>setScannedAsset(null)}><X size={18} className="text-slate-400 hover:text-slate-600"/></button>
-                            </div>
-                            <div className="space-y-2 text-sm">
-                                <InfoField label="ID" value={scannedAsset.id} />
-                                <InfoField label="P/N" value={scannedAsset.metadata.pn} />
-                                <InfoField label="Desc" value={scannedAsset.metadata.description} />
-                                <InfoField label="Estado" value={<StatusBadge status={scannedAsset.current_status}/>} />
-                                <div className="pt-4 mt-4 border-t border-slate-100 flex gap-2">
-                                    <AssetLabelPDF asset={scannedAsset} />
+                     {!scannedAsset ? (
+                        <div className="w-full max-w-sm bg-white p-4 rounded-lg shadow-xl border border-slate-200 text-center">
+                            <h2 className="text-lg font-bold mb-4 text-slate-700">Escanear Código QR</h2>
+                            <div id="reader" className="w-full overflow-hidden rounded-lg bg-black min-h-[250px]"></div>
+                            <p className="text-xs text-slate-400 mt-4">Apunte la cámara al código QR del activo.</p>
+                        </div>
+                    ) : (
+                        <div className="mt-8 bg-white p-6 rounded-lg shadow-lg border border-emerald-200 w-full max-w-md animate-fadeIn relative">
+                            <button onClick={()=>{setScannedAsset(null); setDispatchTargetId(null); setSelectedInventoryItem(null);}} className="absolute top-4 right-4 text-slate-400 hover:text-red-500"><X size={20}/></button>
+                            <div className="flex flex-col items-center mb-6">
+                                <div className="bg-emerald-100 p-4 rounded-full mb-3">
+                                    <CheckCircle size={32} className="text-emerald-600"/>
                                 </div>
+                                <h3 className="font-bold text-slate-800 text-lg">Activo Identificado</h3>
+                                <p className="text-xs text-slate-500 font-mono">{scannedAsset.id.substring(0,8)}...</p>
+                            </div>
+                            <div className="space-y-3 text-sm bg-slate-50 p-4 rounded-lg mb-6">
+                                <InfoField label="P/N" value={scannedAsset.metadata.pn} />
+                                <InfoField label="Descripción" value={scannedAsset.metadata.description} />
+                                <InfoField label="Serial" value={scannedAsset.metadata.serial_ge} />
+                                <InfoField label="Estado" value={<StatusBadge status={scannedAsset.current_status}/>} />
+                            </div>
+                            <div className="flex gap-2">
+                                <button onClick={()=>setScannedAsset(null)} className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-lg hover:bg-slate-200 text-sm">Escanear Otro</button>
+                                {scannedAsset.current_status === AssetStatus.RECEIVED_WH && (
+                                    <button 
+                                        onClick={() => {
+                                            setShowDispatchModal(true); 
+                                            setDispatchTargetId(scannedAsset.id); 
+                                            setSelectedInventoryItem(scannedAsset.metadata.pn); 
+                                            setDispatchData(p => ({...p, quantity: 1}));
+                                        }} 
+                                        className="flex-1 py-3 bg-purple-600 text-white font-bold rounded-lg hover:bg-purple-700 shadow-lg shadow-purple-200 text-sm flex items-center justify-center gap-2"
+                                    >
+                                        <LogOut size={16}/> Salida Stock
+                                    </button>
+                                )}
                             </div>
                         </div>
                     )}
                 </div>
             )}
         </main>
+        
+        {/* MOBILE BOTTOM NAVIGATION BAR */}
+        <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 flex justify-around items-center h-16 z-50 shadow-[0_-2px_10px_rgba(0,0,0,0.05)] pb-safe">
+            <NavButton mobileMode active={activeTab==='DASHBOARD'} onClick={()=>setActiveTab('DASHBOARD')} icon={<LayoutDashboard />} label="Dash" />
+            <NavButton mobileMode active={activeTab==='REQUEST'} onClick={()=>{setActiveTab('REQUEST'); setRequestMode('MENU');}} icon={<FileText />} label="Crear" disabled={!canCreateRequest}/>
+            <NavButton mobileMode active={activeTab==='LOGISTICS'} onClick={()=>setActiveTab('LOGISTICS')} icon={<Truck />} label="Logist" disabled={!canViewLogistics} />
+            <NavButton mobileMode active={activeTab==='WAREHOUSE'} onClick={()=>setActiveTab('WAREHOUSE')} icon={<Warehouse />} label="Bodega" />
+            <NavButton mobileMode active={activeTab==='SCANNER'} onClick={()=>setActiveTab('SCANNER')} icon={<QrCode />} label="Scan" />
+        </nav>
       </div>
 
-      {/* DISPATCH MODAL */}
+      {/* DISPATCH MODAL - FULL SCREEN ON MOBILE */}
       {showDispatchModal && selectedInventoryItem && (
-          <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
-              <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden animate-fadeIn">
-                  <div className="p-6">
+          <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center md:p-4 backdrop-blur-sm">
+              <div className="bg-white md:rounded-xl shadow-2xl w-full h-full md:h-auto md:max-w-lg overflow-y-auto animate-fadeIn flex flex-col">
+                  <div className="p-6 flex-1">
                       <div className="flex justify-between items-start mb-6">
                           <div className="flex items-center gap-3">
                               <div className="bg-slate-100 p-2 rounded-lg text-slate-600">
@@ -1751,10 +1841,14 @@ export default function App() {
                               </div>
                               <div>
                                   <h3 className="text-xl font-bold text-slate-800">Tarjeta de Salida</h3>
-                                  <p className="text-sm text-slate-500">Stock Actual: <span className="font-bold text-slate-700">{inventoryStats[selectedInventoryItem].stock} unidades</span></p>
+                                  {dispatchTargetId ? (
+                                      <p className="text-xs font-bold text-purple-600 bg-purple-50 px-2 py-1 rounded inline-block mt-1">Activo Único: {dispatchTargetId.substring(0,8)}</p>
+                                  ) : (
+                                      <p className="text-sm text-slate-500">Stock: <span className="font-bold text-slate-700">{inventoryStats[selectedInventoryItem]?.stock} unidades</span></p>
+                                  )}
                               </div>
                           </div>
-                          <button onClick={() => setShowDispatchModal(false)} className="text-slate-400 hover:text-red-500 transition-colors"><X size={20}/></button>
+                          <button onClick={() => setShowDispatchModal(false)} className="text-slate-400 hover:text-red-500 transition-colors"><X size={24}/></button>
                       </div>
 
                       <div className="bg-slate-50 rounded-lg p-1 flex mb-6">
@@ -1769,10 +1863,11 @@ export default function App() {
                                   <input 
                                       type="number" 
                                       min="1" 
-                                      max={inventoryStats[selectedInventoryItem].stock}
+                                      max={dispatchTargetId ? 1 : (inventoryStats[selectedInventoryItem]?.stock || 999)}
+                                      disabled={!!dispatchTargetId}
                                       value={dispatchData.quantity}
                                       onChange={(e) => setDispatchData({...dispatchData, quantity: parseInt(e.target.value) || 0})}
-                                      className="w-full border border-slate-300 rounded-lg p-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-100 font-bold text-slate-700"
+                                      className={`w-full border border-slate-300 rounded-lg p-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-100 font-bold text-slate-700 ${dispatchTargetId ? 'bg-slate-100 text-slate-500' : ''}`}
                                   />
                               </div>
                               <div>
@@ -1783,7 +1878,7 @@ export default function App() {
                                       value={dispatchData.reason}
                                       onChange={(e) => setDispatchData({...dispatchData, reason: e.target.value})}
                                       className="w-full border border-slate-300 rounded-lg p-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-100"
-                                      placeholder="Seleccione o escriba..."
+                                      placeholder="Seleccione..."
                                   />
                                   <datalist id="dispatch-reasons">
                                       <option value="Venta" />
@@ -1795,7 +1890,7 @@ export default function App() {
                               </div>
                           </div>
 
-                          <div className="grid grid-cols-2 gap-4">
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                               <div>
                                   <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">Destino</label>
                                   <input 
@@ -1820,10 +1915,12 @@ export default function App() {
                               </div>
                           </div>
                       </div>
-
+                  </div>
+                  
+                  <div className="p-6 border-t bg-slate-50">
                       <button 
                           onClick={handleExecuteDispatch}
-                          className="w-full mt-8 bg-blue-600 text-white py-3.5 rounded-lg font-bold hover:bg-blue-700 flex items-center justify-center gap-2 shadow-lg transition-transform active:scale-[0.98]"
+                          className="w-full bg-blue-600 text-white py-3.5 rounded-lg font-bold hover:bg-blue-700 flex items-center justify-center gap-2 shadow-lg transition-transform active:scale-[0.98]"
                       >
                           Confirmar Salida <ArrowRight size={18} />
                       </button>
@@ -1834,16 +1931,16 @@ export default function App() {
 
       {/* Manual Add Modal */}
       {showAddProductModal && (
-          <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
-              <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden animate-fadeIn">
+          <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center md:p-4 backdrop-blur-sm">
+              <div className="bg-white md:rounded-xl shadow-2xl w-full h-full md:h-auto md:max-w-lg overflow-y-auto animate-fadeIn flex flex-col">
                   <div className="flex justify-between items-center p-6 border-b bg-slate-50">
                       <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
                           <Plus size={20} className="text-blue-600"/>
                           Agregar Ítem Manualmente
                       </h3>
-                      <button onClick={() => setShowAddProductModal(false)} className="text-slate-400 hover:text-red-500 transition-colors"><X size={20}/></button>
+                      <button onClick={() => setShowAddProductModal(false)} className="text-slate-400 hover:text-red-500 transition-colors"><X size={24}/></button>
                   </div>
-                  <form onSubmit={handleCreateNewProduct} className="p-6 space-y-5">
+                  <form onSubmit={handleCreateNewProduct} className="p-6 space-y-5 flex-1">
                       {/* ... existing form fields ... */}
                       <div className="grid grid-cols-2 gap-4">
                           <div>
@@ -1873,16 +1970,16 @@ export default function App() {
 
       {/* Edit Product Modal */}
       {editingItem && (
-          <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
-              <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden animate-fadeIn">
+          <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center md:p-4 backdrop-blur-sm">
+              <div className="bg-white md:rounded-xl shadow-2xl w-full h-full md:h-auto md:max-w-lg overflow-y-auto animate-fadeIn flex flex-col">
                   <div className="flex justify-between items-center p-6 border-b bg-slate-50">
                       <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
                           <Edit3 size={20} className="text-blue-600"/>
                           Editar Detalles: {editingItem.pn}
                       </h3>
-                      <button onClick={() => setEditingItem(null)} className="text-slate-400 hover:text-red-500 transition-colors"><X size={20}/></button>
+                      <button onClick={() => setEditingItem(null)} className="text-slate-400 hover:text-red-500 transition-colors"><X size={24}/></button>
                   </div>
-                  <form onSubmit={handleEditProduct} className="p-6 space-y-5">
+                  <form onSubmit={handleEditProduct} className="p-6 space-y-5 flex-1">
                       <div className="p-3 bg-blue-50 text-blue-800 text-xs rounded border border-blue-200">
                           <strong>Nota:</strong> Los cambios realizados aquí actualizarán todos los activos con el SKU <strong>{editingItem.pn}</strong> que estén actualmente en el inventario.
                       </div>
@@ -1900,9 +1997,9 @@ export default function App() {
                               <input name="stock" type="number" min="0" defaultValue={editingItem.stock} className="w-full border rounded p-2 text-sm bg-yellow-50 focus:bg-white"/>
                           </div>
                       </div>
-                      <div className="flex justify-end gap-2 mt-4">
-                          <button type="button" onClick={()=>setEditingItem(null)} className="px-4 py-2 bg-slate-100 text-slate-600 rounded font-bold hover:bg-slate-200">Cancelar</button>
-                          <button type="submit" className="px-4 py-2 bg-blue-600 text-white rounded font-bold hover:bg-blue-700">Guardar Cambios</button>
+                      <div className="flex justify-end gap-2 mt-4 pt-4 border-t">
+                          <button type="button" onClick={()=>setEditingItem(null)} className="px-4 py-2 bg-slate-100 text-slate-600 rounded font-bold hover:bg-slate-200 flex-1">Cancelar</button>
+                          <button type="submit" className="px-4 py-2 bg-blue-600 text-white rounded font-bold hover:bg-blue-700 flex-1">Guardar</button>
                       </div>
                   </form>
               </div>
@@ -1911,8 +2008,8 @@ export default function App() {
 
       {/* View Assets / QR Modal */}
       {viewingAssetsItem && (
-          <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
-              <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden animate-fadeIn flex flex-col max-h-[80vh]">
+          <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center md:p-4 backdrop-blur-sm">
+              <div className="bg-white md:rounded-xl shadow-2xl w-full h-full md:h-auto md:max-w-2xl overflow-hidden animate-fadeIn flex flex-col md:max-h-[80vh]">
                   <div className="flex justify-between items-center p-6 border-b bg-slate-50">
                       <div>
                           <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
@@ -1921,43 +2018,45 @@ export default function App() {
                           </h3>
                           <p className="text-xs text-slate-500 mt-1">{viewingAssetsItem.description}</p>
                       </div>
-                      <button onClick={() => setViewingAssetsItem(null)} className="text-slate-400 hover:text-red-500 transition-colors"><X size={20}/></button>
+                      <button onClick={() => setViewingAssetsItem(null)} className="text-slate-400 hover:text-red-500 transition-colors"><X size={24}/></button>
                   </div>
                   <div className="flex-1 overflow-y-auto p-4">
                       {viewingAssetsItem.assets.length === 0 ? (
                           <div className="text-center text-slate-400 py-10">No hay activos registrados para este código.</div>
                       ) : (
-                          <table className="w-full text-sm text-left">
-                              <thead className="bg-slate-100 text-slate-500 uppercase text-xs sticky top-0">
-                                  <tr>
-                                      <th className="p-3">Serial / ID</th>
-                                      <th className="p-3">Estado</th>
-                                      <th className="p-3">Orden GE</th>
-                                      <th className="p-3 text-center">Etiqueta QR</th>
-                                  </tr>
-                              </thead>
-                              <tbody className="divide-y divide-slate-100">
-                                  {viewingAssetsItem.assets.map(asset => (
-                                      <tr key={asset.id} className="hover:bg-slate-50">
-                                          <td className="p-3">
-                                              <div className="font-bold text-slate-700">{asset.metadata.serial_ge}</div>
-                                              <div className="text-[10px] text-slate-400 font-mono">{asset.id.substring(0,8)}...</div>
-                                          </td>
-                                          <td className="p-3"><StatusBadge status={asset.current_status}/></td>
-                                          <td className="p-3 text-xs">{asset.metadata.numero_orden_ge}</td>
-                                          <td className="p-3 text-center">
-                                              <div className="max-w-[120px] mx-auto">
-                                                  <AssetLabelPDF asset={asset} />
-                                              </div>
-                                          </td>
+                          <div className="overflow-x-auto">
+                              <table className="w-full text-sm text-left min-w-[500px]">
+                                  <thead className="bg-slate-100 text-slate-500 uppercase text-xs sticky top-0">
+                                      <tr>
+                                          <th className="p-3">Serial / ID</th>
+                                          <th className="p-3">Estado</th>
+                                          <th className="p-3">Orden GE</th>
+                                          <th className="p-3 text-center">Etiqueta QR</th>
                                       </tr>
-                                  ))}
-                              </tbody>
-                          </table>
+                                  </thead>
+                                  <tbody className="divide-y divide-slate-100">
+                                      {viewingAssetsItem.assets.map(asset => (
+                                          <tr key={asset.id} className="hover:bg-slate-50">
+                                              <td className="p-3">
+                                                  <div className="font-bold text-slate-700">{asset.metadata.serial_ge}</div>
+                                                  <div className="text-[10px] text-slate-400 font-mono">{asset.id.substring(0,8)}...</div>
+                                              </td>
+                                              <td className="p-3"><StatusBadge status={asset.current_status}/></td>
+                                              <td className="p-3 text-xs">{asset.metadata.numero_orden_ge}</td>
+                                              <td className="p-3 text-center">
+                                                  <div className="max-w-[120px] mx-auto">
+                                                      <AssetLabelPDF asset={asset} />
+                                                  </div>
+                                              </td>
+                                          </tr>
+                                      ))}
+                                  </tbody>
+                              </table>
+                          </div>
                       )}
                   </div>
                   <div className="p-4 border-t bg-slate-50 flex justify-end">
-                      <button onClick={()=>setViewingAssetsItem(null)} className="px-6 py-2 bg-slate-800 text-white rounded font-bold hover:bg-slate-900">Cerrar</button>
+                      <button onClick={()=>setViewingAssetsItem(null)} className="w-full md:w-auto px-6 py-2 bg-slate-800 text-white rounded font-bold hover:bg-slate-900">Cerrar</button>
                   </div>
               </div>
           </div>
