@@ -16,6 +16,7 @@ import { AssetLabelPDF } from './components/AssetLabelPDF';
 import { AuditLogViewer } from './components/AuditLogViewer';
 import { LoginScreen } from './components/LoginScreen';
 import { auth, db } from './firebase'; // Import DB instances
+import { Html5QrcodeScanner } from 'html5-qrcode';
 import { 
   Truck, 
   Warehouse, 
@@ -325,6 +326,8 @@ export default function App() {
 
   // Dispatch Modal State
   const [showDispatchModal, setShowDispatchModal] = useState(false);
+  const [dispatchTargetId, setDispatchTargetId] = useState<string | null>(null); // NEW: Specific Asset dispatch
+  
   const [dispatchData, setDispatchData] = useState({
       quantity: 1,
       reason: 'Venta',
@@ -522,6 +525,56 @@ export default function App() {
     return () => window.removeEventListener('wheel', handleZoom);
   }, []);
 
+  // --- SCANNER EFFECT ---
+  useEffect(() => {
+    let scanner: Html5QrcodeScanner | null = null;
+    
+    // Only initialize if tab is SCANNER and no modal is open and we haven't scanned anything yet
+    if (activeTab === 'SCANNER' && !scannedAsset && !showDispatchModal) {
+        // Small delay to ensure DOM is ready
+        const timer = setTimeout(() => {
+            const element = document.getElementById('reader');
+            if (element) {
+                element.innerHTML = ""; // Clear
+                try {
+                    scanner = new Html5QrcodeScanner(
+                        "reader",
+                        { fps: 10, qrbox: { width: 250, height: 250 } },
+                        false
+                    );
+                    scanner.render(onScanSuccess, onScanFailure);
+                } catch (e) { console.error("Scanner Error:", e); }
+            }
+        }, 100);
+
+        function onScanSuccess(decodedText: string, decodedResult: any) {
+            try {
+                // Expecting JSON { id: "UUID", ... }
+                const data = JSON.parse(decodedText);
+                if (data.id) {
+                    const asset = assets.find(a => a.id === data.id);
+                    if (asset) {
+                        setScannedAsset(asset);
+                        scanner?.clear();
+                    } else {
+                        alert("Activo no encontrado en base de datos local.");
+                    }
+                }
+            } catch (e) {
+                console.warn("QR no válido", e);
+            }
+        }
+        function onScanFailure(error: any) {}
+
+        return () => {
+            clearTimeout(timer);
+            if (scanner) {
+                scanner.clear().catch(err => console.error(err));
+            }
+        };
+    }
+  }, [activeTab, scannedAsset, showDispatchModal, assets]);
+
   // --- FIRESTORE SUBSCRIPTION ---
   useEffect(() => {
     if (!currentUser) return;
@@ -605,7 +658,6 @@ export default function App() {
 
   // --- Handlers: Editing and Updates ---
 
-  // Handle Edit Product Details (Master Inventory) AND Stock Adjustment
   const handleEditProduct = async (e: React.FormEvent) => {
       e.preventDefault();
       if (!editingItem || !currentUser) return;
@@ -624,13 +676,8 @@ export default function App() {
           editingItem.assets.forEach(asset => {
               const updatedAsset = {
                   ...asset,
-                  metadata: {
-                      ...asset.metadata,
-                      description: newDesc,
-                      cost: newCost
-                  }
+                  metadata: { ...asset.metadata, description: newDesc, cost: newCost }
               };
-              
               const log: AuditLogEntry = {
                   id: generateUUID(),
                   asset_id: asset.id,
@@ -640,89 +687,56 @@ export default function App() {
                   new_value: { metadata: updatedAsset.metadata },
                   timestamp
               };
-
               batch.set(db.collection("assets").doc(asset.id), updatedAsset);
               batch.set(db.collection("audit_log").doc(log.id), log);
               count++;
           });
 
           // 2. Handle Stock Adjustment (Add or Remove Assets)
-          // Calculate active stock currently in memory for this item
-          const activeAssets = editingItem.assets.filter(a => 
-              a.current_status === AssetStatus.RECEIVED_WH || 
-              a.current_status === AssetStatus.QUALITY_CHECK
-          );
+          const activeAssets = editingItem.assets.filter(a => a.current_status === AssetStatus.RECEIVED_WH || a.current_status === AssetStatus.QUALITY_CHECK);
           const currentStock = activeAssets.length;
           const diff = newStock - currentStock;
 
           if (diff > 0) {
-              // INCREASE STOCK: Create new assets
-              // Use metadata from first existing asset or editingItem as base
               const baseAsset = editingItem.assets[0]; 
-              
               for (let i = 0; i < diff; i++) {
                   const newId = generateUUID();
                   const logId = generateUUID();
-                  
                   const newAsset: Asset = {
                       id: newId,
                       current_status: AssetStatus.RECEIVED_WH,
                       lifecycle_lock: false,
                       metadata: {
                           ...baseAsset.metadata,
-                          description: newDesc, // Ensure new desc/cost is used
+                          description: newDesc,
                           cost: newCost,
-                          serial_ge: `ADJ-${Date.now()}-${i}`, // Generated Serial for Adjustment
-                          cantidad: 1, // Single unit tracking
+                          serial_ge: `ADJ-${Date.now()}-${i}`,
+                          cantidad: 1,
                           fecha_solicitud: timestamp
                       },
                       logistics: { ...baseAsset.logistics, tracking_number: 'MANUAL_ADJ' },
-                      warehouse: { 
-                          aisle: 'ADJUSTMENT', 
-                          bin: 'MANUAL', 
-                          qr_hash: `ADJ-${baseAsset.metadata.pn}` 
-                      }
+                      warehouse: { aisle: 'ADJUSTMENT', bin: 'MANUAL', qr_hash: `ADJ-${baseAsset.metadata.pn}` }
                   };
-
-                  const log: AuditLogEntry = {
-                      id: logId,
-                      asset_id: newId,
-                      actor_id: currentUser.id,
-                      action: 'CREATE',
-                      prev_value: null,
-                      new_value: newAsset,
-                      timestamp
-                  };
-
+                  const log: AuditLogEntry = { id: logId, asset_id: newId, actor_id: currentUser.id, action: 'CREATE', prev_value: null, new_value: newAsset, timestamp };
                   batch.set(db.collection("assets").doc(newId), newAsset);
                   batch.set(db.collection("audit_log").doc(logId), log);
               }
           } else if (diff < 0) {
-              // DECREASE STOCK: Dispatch existing assets (Remove from stock)
               const removeCount = Math.abs(diff);
-              // We remove the oldest or arbitrary active assets. 
               const assetsToRemove = activeAssets.slice(0, removeCount);
-              
               assetsToRemove.forEach(asset => {
                   const transition = AssetLifecycleService.transitionStatus(asset, AssetStatus.DISPATCHED, currentUser);
-                  // We can add a note or modify the transition logic if needed, but standard dispatch works for "Removing from stock"
                   batch.set(db.collection("assets").doc(transition.updatedAsset.id), transition.updatedAsset);
                   batch.set(db.collection("audit_log").doc(transition.auditLog.id), transition.auditLog);
               });
           }
-
           await batch.commit();
           setEditingItem(null);
           alert(`Producto actualizado.\n- Detalles actualizados en ${count} registros.\n- Ajuste de Stock: ${diff > 0 ? '+' : ''}${diff}`);
-      } catch (err: any) {
-          showError(err.message);
-      }
+      } catch (err: any) { showError(err.message); }
   };
-
-  // ... (Existing Warehouse Handlers: handleConfirmReception, handleConfirmMovement, handleCreateNewProduct, handleImportInitialInventory) ...
-  // [Keeping these intact as they are complex logic, just re-referencing in the component body]
   
-  const handleConfirmReception = async (e: React.FormEvent) => { /* ... existing code ... */ 
+  const handleConfirmReception = async (e: React.FormEvent) => {
       e.preventDefault();
       if (!receivingAsset || !currentUser) return;
       const formData = new FormData(e.target as HTMLFormElement);
@@ -740,123 +754,74 @@ export default function App() {
       } catch (err: any) { showError(err.message); }
   };
 
-  // New Open Modal Handler
   const handleOpenDispatchModal = (e: React.FormEvent) => {
       e.preventDefault();
       if (!selectedInventoryItem) return;
+      setDispatchTargetId(null);
       setShowDispatchModal(true);
       setDispatchData(prev => ({ ...prev, quantity: 1 }));
   };
 
-  // Improved Dispatch Logic with Modal Data
+  // Improved Dispatch Logic: Handles single scanned asset or FIFO
   const handleExecuteDispatch = async () => {
     if (!selectedInventoryItem || !currentUser) return;
     const itemData = inventoryStats[selectedInventoryItem];
     if (!itemData) return;
 
-    if (dispatchData.quantity <= 0) {
-        showError("La cantidad debe ser mayor a 0.");
-        return;
-    }
-    if (dispatchData.quantity > itemData.stock) {
-        showError(`No hay suficiente stock. Disponible: ${itemData.stock}`);
-        return;
-    }
-    if (!dispatchData.reason || !dispatchData.destination || !dispatchData.employee) {
-        showError("Por favor complete todos los campos (Motivo, Destino, Empleado).");
-        return;
-    }
+    if (dispatchData.quantity <= 0) { showError("La cantidad debe ser mayor a 0."); return; }
+    if (!dispatchTargetId && dispatchData.quantity > itemData.stock) { showError(`No hay suficiente stock. Disponible: ${itemData.stock}`); return; }
+    if (!dispatchData.reason || !dispatchData.destination || !dispatchData.employee) { showError("Por favor complete todos los campos (Motivo, Destino, Empleado)."); return; }
 
     try {
         const batch = db.batch();
         let remainingToDispatch = dispatchData.quantity;
-        
-        // Find available assets (FIFOish: we take in order of array, assuming array is sorted by date/import)
-        const availableAssets = itemData.assets.filter(a => a.current_status === AssetStatus.RECEIVED_WH || a.current_status === AssetStatus.QUALITY_CHECK);
+        let availableAssets: Asset[] = [];
+
+        if (dispatchTargetId) {
+             const target = assets.find(a => a.id === dispatchTargetId);
+             if (target && (target.current_status === AssetStatus.RECEIVED_WH || target.current_status === AssetStatus.QUALITY_CHECK)) {
+                 availableAssets = [target];
+                 if (dispatchData.quantity > 1) { showError("Al despachar un activo específico, la cantidad debe ser 1."); return; }
+             } else {
+                 showError("El activo escaneado no está disponible."); return;
+             }
+        } else {
+             availableAssets = itemData.assets.filter(a => a.current_status === AssetStatus.RECEIVED_WH || a.current_status === AssetStatus.QUALITY_CHECK);
+        }
 
         for (const asset of availableAssets) {
             if (remainingToDispatch <= 0) break;
-
             const assetQty = asset.metadata.cantidad || 1;
-
             if (assetQty <= remainingToDispatch) {
-                // CASE 1: Consume entire asset
                 let updatedAsset = { ...asset };
-                
-                // Add dispatch details to warehouse metadata (using casting for flexible fields)
-                const whUpdates = {
-                    responsable_egreso: dispatchData.employee,
-                    destino_final: dispatchData.destination,
-                    motivo_salida: dispatchData.reason
-                } as any;
-
+                const whUpdates = { responsable_egreso: dispatchData.employee, destino_final: dispatchData.destination, motivo_salida: dispatchData.reason } as any;
                 updatedAsset = AssetLifecycleService.updateField(updatedAsset, 'warehouse', whUpdates, currentUser).updatedAsset;
-                
-                // Ensure QR Hash exists
-                if (!updatedAsset.warehouse.qr_hash) {
-                    updatedAsset.warehouse.qr_hash = AssetLifecycleService.generateQRPayload(updatedAsset);
-                }
-
+                if (!updatedAsset.warehouse.qr_hash) { updatedAsset.warehouse.qr_hash = AssetLifecycleService.generateQRPayload(updatedAsset); }
                 const result = AssetLifecycleService.transitionStatus(updatedAsset, AssetStatus.DISPATCHED, currentUser);
                 batch.set(db.collection("assets").doc(result.updatedAsset.id), result.updatedAsset);
                 batch.set(db.collection("audit_log").doc(result.auditLog.id), result.auditLog);
-                
                 remainingToDispatch -= assetQty;
-
             } else {
-                // CASE 2: Split asset (Asset has more than needed)
                 const newQtyForDispatch = remainingToDispatch;
                 const remainingQtyInStock = assetQty - remainingToDispatch;
-
-                // 2a. Update original asset (reduce qty)
-                const updatedOriginalAsset = { 
-                    ...asset, 
-                    metadata: { ...asset.metadata, cantidad: remainingQtyInStock } 
-                };
+                const updatedOriginalAsset = { ...asset, metadata: { ...asset.metadata, cantidad: remainingQtyInStock } };
                 batch.set(db.collection("assets").doc(updatedOriginalAsset.id), updatedOriginalAsset);
-
-                // 2b. Create new asset for dispatch
                 const newDispatchId = generateUUID();
-                const logId = generateUUID();
-                
-                const dispatchedAsset: Asset = {
-                    ...asset,
-                    id: newDispatchId,
-                    metadata: { 
-                        ...asset.metadata, 
-                        cantidad: newQtyForDispatch,
-                        serial_ge: `${asset.metadata.serial_ge}-SPLIT` // Mark split to avoid duplicate serial issues ideally
-                    },
-                    warehouse: {
-                        ...asset.warehouse,
-                        responsable_egreso: dispatchData.employee,
-                        destino_final: dispatchData.destination,
-                        motivo_salida: dispatchData.reason,
-                        qr_hash: AssetLifecycleService.generateQRPayload({ ...asset, id: newDispatchId })
-                    },
-                    current_status: AssetStatus.RECEIVED_WH // Start here to transition validly
-                };
-
-                // Transition immediately to dispatched
+                const dispatchedAsset: Asset = { ...asset, id: newDispatchId, metadata: { ...asset.metadata, cantidad: newQtyForDispatch, serial_ge: `${asset.metadata.serial_ge}-SPLIT` }, warehouse: { ...asset.warehouse, responsable_egreso: dispatchData.employee, destino_final: dispatchData.destination, motivo_salida: dispatchData.reason, qr_hash: AssetLifecycleService.generateQRPayload({ ...asset, id: newDispatchId }) }, current_status: AssetStatus.RECEIVED_WH };
                 const result = AssetLifecycleService.transitionStatus(dispatchedAsset, AssetStatus.DISPATCHED, currentUser);
-                
-                // Log creation of split
                 batch.set(db.collection("assets").doc(result.updatedAsset.id), result.updatedAsset);
                 batch.set(db.collection("audit_log").doc(result.auditLog.id), result.auditLog);
-
                 remainingToDispatch = 0;
             }
         }
-
         await batch.commit();
         setShowDispatchModal(false);
-        setDispatchData({ quantity: 1, reason: 'Venta', destination: '', employee: '' }); // Reset
+        setDispatchData({ quantity: 1, reason: 'Venta', destination: '', employee: '' });
         setSelectedInventoryItem(null);
-        alert(`Despacho de ${dispatchData.quantity} unidades registrado exitosamente.`);
-
-    } catch (err: any) {
-        showError("Error al despachar: " + err.message);
-    }
+        setDispatchTargetId(null);
+        setScannedAsset(null);
+        alert(`Despacho registrado exitosamente.`);
+    } catch (err: any) { showError("Error al despachar: " + err.message); }
   };
 
   const handleCreateNewProduct = async (e: React.FormEvent) => {
@@ -869,35 +834,21 @@ export default function App() {
       const cost = Number(target.cost?.value || formData.get('cost'));
       const stockInicial = Number(target.stock?.value || formData.get('stock'));
       if (!pn || !description) return;
-
       try {
           const batch = db.batch();
           const timestamp = new Date().toISOString();
           for(let i=0; i < (stockInicial || 1); i++) {
-              const newId = generateUUID();
-              const logId = generateUUID();
-              const newAsset: Asset = {
-                  id: newId,
-                  current_status: stockInicial > 0 ? AssetStatus.RECEIVED_WH : AssetStatus.DRAFT, 
-                  lifecycle_lock: false,
-                  metadata: {
-                      workflow_id: 'MANUAL_ENTRY', provider: 'GENERAL', cliente_final: 'STOCK', equipo_destino: 'BODEGA', condicion: AssetCondition.PURCHASE, numero_orden_ge: 'STOCK_INIT',
-                      fecha_solicitud: timestamp, pn: String(pn), description: String(description), cantidad: 1, cost: cost, serial_ge: `GEN-${Date.now()}-${i}`
-                  },
-                  logistics: { documents: {}, extra_docs: [], tracking_number: 'MANUAL' },
-                  warehouse: { aisle: 'GEN', bin: '01', qr_hash: `MANUAL-${String(pn)}` }
-              };
+              const newId = generateUUID(); const logId = generateUUID();
+              const newAsset: Asset = { id: newId, current_status: stockInicial > 0 ? AssetStatus.RECEIVED_WH : AssetStatus.DRAFT, lifecycle_lock: false, metadata: { workflow_id: 'MANUAL_ENTRY', provider: 'GENERAL', cliente_final: 'STOCK', equipo_destino: 'BODEGA', condicion: AssetCondition.PURCHASE, numero_orden_ge: 'STOCK_INIT', fecha_solicitud: timestamp, pn: String(pn), description: String(description), cantidad: 1, cost: cost, serial_ge: `GEN-${Date.now()}-${i}` }, logistics: { documents: {}, extra_docs: [], tracking_number: 'MANUAL' }, warehouse: { aisle: 'GEN', bin: '01', qr_hash: `MANUAL-${String(pn)}` } };
               const log: AuditLogEntry = { id: logId, asset_id: newAsset.id, actor_id: currentUser.id, action: 'CREATE', prev_value: null, new_value: newAsset, timestamp };
               batch.set(db.collection("assets").doc(newAsset.id), newAsset);
               batch.set(db.collection("audit_log").doc(log.id), log);
           }
-          await batch.commit();
-          setShowAddProductModal(false);
-          alert("Producto agregado al inventario.");
-      } catch (err: any) { console.error(err); alert("Error al crear: " + err.message); }
+          await batch.commit(); setShowAddProductModal(false); alert("Producto agregado al inventario.");
+      } catch (err: any) { alert("Error al crear: " + err.message); }
   };
 
-  const handleImportInitialInventory = async () => { /* ... existing code ... */ 
+  const handleImportInitialInventory = async () => {
       if (!currentUser) return;
       if (!confirm(`¿Desea cargar el inventario inicial?`)) return;
       setImporting(true);
@@ -913,12 +864,7 @@ export default function App() {
               batchData.forEach((item: any, index: number) => {
                   if (existingPNs.has(item.sku)) return; 
                   const newId = generateUUID(); const logId = generateUUID(); const globalIndex = totalProcessed + index; 
-                  const newAsset: Asset = {
-                      id: newId, current_status: AssetStatus.RECEIVED_WH, lifecycle_lock: false,
-                      metadata: { workflow_id: 'IMPORT_INIT_PDF', provider: 'INITIAL_LOAD', cliente_final: 'STOCK', equipo_destino: 'BODEGA', condicion: AssetCondition.PURCHASE, numero_orden_ge: 'INIT-2025', fecha_solicitud: timestamp, pn: item.sku, description: item.desc, cantidad: item.qty, cost: item.cost, serial_ge: `INIT-${Date.now()}-${globalIndex}` },
-                      logistics: { documents: {}, extra_docs: [], tracking_number: 'INIT_LOAD', importacion_procesada: true },
-                      warehouse: { aisle: 'BODEGA', bin: 'GENERAL', qr_hash: `INIT-${item.sku}` }
-                  };
+                  const newAsset: Asset = { id: newId, current_status: AssetStatus.RECEIVED_WH, lifecycle_lock: false, metadata: { workflow_id: 'IMPORT_INIT_PDF', provider: 'INITIAL_LOAD', cliente_final: 'STOCK', equipo_destino: 'BODEGA', condicion: AssetCondition.PURCHASE, numero_orden_ge: 'INIT-2025', fecha_solicitud: timestamp, pn: item.sku, description: item.desc, cantidad: item.qty, cost: item.cost, serial_ge: `INIT-${Date.now()}-${globalIndex}` }, logistics: { documents: {}, extra_docs: [], tracking_number: 'INIT_LOAD', importacion_procesada: true }, warehouse: { aisle: 'BODEGA', bin: 'GENERAL', qr_hash: `INIT-${item.sku}` } };
                   const log: AuditLogEntry = { id: logId, asset_id: newId, actor_id: currentUser.id, action: 'CREATE', prev_value: null, new_value: newAsset, timestamp };
                   batch.set(db.collection("assets").doc(newId), newAsset);
                   batch.set(db.collection("audit_log").doc(log.id), log);
@@ -926,13 +872,10 @@ export default function App() {
               });
               if (batchCount > 0) { await batch.commit(); totalProcessed += batchCount; }
           }
-          alert(`Carga completa: ${totalProcessed} items nuevos.`);
-          setWarehouseSubTab('INVENTORY'); 
+          alert(`Carga completa: ${totalProcessed} items nuevos.`); setWarehouseSubTab('INVENTORY'); 
       } catch (err: any) { alert("Error al importar: " + err.message); } finally { setImporting(false); }
   };
 
-  // ... (Other handlers like handleCreateRequest, handleUpdateLogistics, etc. - kept as is but included in main render structure implicitly)
-  // [Code omitted for brevity as it remains unchanged from previous full file]
   const handleAddRequestItem = () => {
     const pn = pnRef.current?.value; const desc = descRef.current?.value; const qty = Number(qtyRef.current?.value); const cost = Number(costRef.current?.value);
     if (!pn || !desc || !qty || !cost) { showError("Complete todos los campos"); return; }
@@ -940,13 +883,13 @@ export default function App() {
     if(pnRef.current) pnRef.current.value = ''; if(descRef.current) descRef.current.value = ''; if(qtyRef.current) qtyRef.current.value = '1'; if(costRef.current) costRef.current.value = ''; pnRef.current?.focus();
   };
   const handleRemoveRequestItem = (id: string) => setRequestItems(prev => prev.filter(i => i.id !== id));
-  const handleCreateRequest = async (e: React.FormEvent) => { /* ... existing ... */ 
+  const handleCreateRequest = async (e: React.FormEvent) => {
     e.preventDefault(); if (!currentUser || !canCreateRequest) return;
     const formData = new FormData(e.target as HTMLFormElement); const batch = db.batch(); const timestamp = new Date().toISOString();
     requestItems.forEach(item => { const newId = generateUUID(); const logId = generateUUID(); const newAsset: Asset = { id: newId, current_status: AssetStatus.DRAFT, lifecycle_lock: false, metadata: { workflow_id: formData.get('workflow_id') as string, provider: formData.get('provider') as string, cliente_final: formData.get('cliente_final') as string, equipo_destino: formData.get('equipo_destino') as string, condicion: formData.get('condicion') as AssetCondition, numero_orden_ge: formData.get('numero_orden_ge') as string, fecha_solicitud: timestamp, pn: item.pn, description: item.description, cantidad: item.cantidad, cost: item.cost, serial_ge: 'PENDIENTE' }, logistics: { documents: {}, extra_docs: [] }, warehouse: {} }; const log: AuditLogEntry = { id: logId, asset_id: newAsset.id, actor_id: currentUser.id, action: 'CREATE', prev_value: null, new_value: newAsset, timestamp: timestamp }; batch.set(db.collection("assets").doc(newAsset.id), newAsset); batch.set(db.collection("audit_log").doc(log.id), log); });
     await batch.commit(); setActiveTab('LOGISTICS'); setRequestItems([]); alert(`Solicitud creada.`); setRequestMode('MENU');
   };
-  const handleTogglePendingSelection = (id: string) => { /* ... existing ... */ 
+  const handleTogglePendingSelection = (id: string) => {
       let newSelection: string[] = [];
       const clickedAsset = assets.find(a => a.id === id);
       if (pendingSelection.includes(id)) { newSelection = pendingSelection.filter(item => item !== id); } else {
@@ -958,7 +901,7 @@ export default function App() {
   };
   const handleSidebarSelect = (id: string) => { setPendingSelection([]); setIsConsolidationMode(false); setConsolidationList([]); setSelectedAssetId(id); if(activeTab === 'REQUEST') setActiveTab('LOGISTICS'); };
   const handleGoToClosing = () => { if (!selectedAsset) return; if (!selectedAsset.metadata.cost_breakdown?.items || selectedAsset.metadata.cost_breakdown.items.length === 0) { populateItemsFromAsset(selectedAsset); } setLogisticsSubTab('FINAL'); };
-  const handleUpdateLogisticsInitial = async (e: React.FormEvent) => { /* ... existing ... */ 
+  const handleUpdateLogisticsInitial = async (e: React.FormEvent) => {
       e.preventDefault(); if (!selectedAsset || !currentUser) return;
       const formData = new FormData(e.target as HTMLFormElement);
       try {
@@ -977,7 +920,7 @@ export default function App() {
         await batch.commit(); setPendingSelection([]); setConsolidationList([]); setIsConsolidationMode(false); alert(`Datos guardados.`);
       } catch (err: any) { showError(err.message); }
   };
-  const handleUpdateLogisticsFinal = async (e: React.FormEvent) => { /* ... existing ... */ 
+  const handleUpdateLogisticsFinal = async (e: React.FormEvent) => {
     e.preventDefault(); if (!selectedAsset || !currentUser) return; const formData = new FormData(e.target as HTMLFormElement);
     try {
         const costBreakdown: ImportationCosts = { fecha_llegada_almacen: formData.get('fecha_llegada_almacen') as string, no_liquidacion: formData.get('no_liquidacion') as string, no_dai: formData.get('no_dai') as string, ...localExpenses, total_gastos_locales: (Object.values(localExpenses) as number[]).reduce((a, b) => a + b, 0), items: itemsState, facturas_proveedores: [] };
@@ -989,7 +932,7 @@ export default function App() {
         batch.set(db.collection("assets").doc(currentAsset.id), currentAsset); await batch.commit(); alert(`Costos guardados.`);
     } catch (err: any) { showError(err.message); }
   };
-  const handleUploadDoc = async (e: React.FormEvent) => { /* ... existing ... */ e.preventDefault(); if (!selectedAsset || !currentUser || !docFile || !docName) return; try { const newDoc: StoredDocument = { id: generateUUID(), name: docName, filename: docFile.name, uploaded_by: currentUser.name, date: new Date().toISOString(), url: '#' }; const currentDocs = selectedAsset.logistics.extra_docs || []; const result = AssetLifecycleService.updateField(selectedAsset, 'logistics', { extra_docs: [...currentDocs, newDoc] }, currentUser); const batch = db.batch(); batch.set(db.collection("assets").doc(result.updatedAsset.id), result.updatedAsset); batch.set(db.collection("audit_log").doc(result.auditLog.id), result.auditLog); await batch.commit(); setDocName(''); setDocFile(null); alert("Documento agregado."); } catch (err: any) { showError(err.message); } };
+  const handleUploadDoc = async (e: React.FormEvent) => { e.preventDefault(); if (!selectedAsset || !currentUser || !docFile || !docName) return; try { const newDoc: StoredDocument = { id: generateUUID(), name: docName, filename: docFile.name, uploaded_by: currentUser.name, date: new Date().toISOString(), url: '#' }; const currentDocs = selectedAsset.logistics.extra_docs || []; const result = AssetLifecycleService.updateField(selectedAsset, 'logistics', { extra_docs: [...currentDocs, newDoc] }, currentUser); const batch = db.batch(); batch.set(db.collection("assets").doc(result.updatedAsset.id), result.updatedAsset); batch.set(db.collection("audit_log").doc(result.auditLog.id), result.auditLog); await batch.commit(); setDocName(''); setDocFile(null); alert("Documento agregado."); } catch (err: any) { showError(err.message); } };
   const handleDeleteDoc = async (docId: string) => { if (!selectedAsset || !currentUser) return; if (!confirm("¿Eliminar documento?")) return; try { const currentDocs = selectedAsset.logistics.extra_docs || []; const result = AssetLifecycleService.updateField(selectedAsset, 'logistics', { extra_docs: currentDocs.filter(d => d.id !== docId) }, currentUser); const batch = db.batch(); batch.set(db.collection("assets").doc(result.updatedAsset.id), result.updatedAsset); batch.set(db.collection("audit_log").doc(result.auditLog.id), result.auditLog); await batch.commit(); } catch (err: any) { showError(err.message); } };
   const handleScanMock = () => { if(assets.length>0) setScannedAsset(assets[0]); else showError("No assets."); };
   const showError = (msg: string) => { setErrorMsg(msg); setTimeout(() => setErrorMsg(null), 5000); };
@@ -1832,28 +1775,43 @@ export default function App() {
             {/* SCANNER TAB */}
             {activeTab === 'SCANNER' && (
                 <div className="flex flex-col items-center justify-center h-full text-slate-400">
-                    <div className="bg-white p-8 rounded-2xl shadow-xl text-center max-w-sm border border-slate-200">
-                        <ScanLine size={64} className="mx-auto mb-4 text-blue-500 animate-pulse"/>
-                        <h2 className="text-xl font-bold text-slate-800 mb-2">Escáner de Códigos QR</h2>
-                        <p className="text-sm text-slate-500 mb-6">Utilice la cámara de su dispositivo para escanear etiquetas de activos y ver detalles.</p>
-                        <button onClick={handleScanMock} className="bg-slate-900 text-white px-6 py-3 rounded-lg font-bold w-full hover:bg-slate-800 transition-colors">
-                            Simular Escaneo
-                        </button>
-                    </div>
-                    {scannedAsset && (
-                        <div className="mt-8 bg-white p-6 rounded-lg shadow-lg border border-emerald-200 w-full max-w-md animate-fadeIn">
-                            <div className="flex justify-between items-start mb-4">
-                                <h3 className="font-bold text-emerald-700 flex items-center gap-2"><CheckCircle size={18}/> Activo Identificado</h3>
-                                <button onClick={()=>setScannedAsset(null)}><X size={18} className="text-slate-400 hover:text-slate-600"/></button>
-                            </div>
-                            <div className="space-y-2 text-sm">
-                                <InfoField label="ID" value={scannedAsset.id} />
-                                <InfoField label="P/N" value={scannedAsset.metadata.pn} />
-                                <InfoField label="Desc" value={scannedAsset.metadata.description} />
-                                <InfoField label="Estado" value={<StatusBadge status={scannedAsset.current_status}/>} />
-                                <div className="pt-4 mt-4 border-t border-slate-100 flex gap-2">
-                                    <AssetLabelPDF asset={scannedAsset} />
+                     {!scannedAsset ? (
+                        <div className="w-full max-w-sm bg-white p-4 rounded-lg shadow-xl border border-slate-200 text-center">
+                            <h2 className="text-lg font-bold mb-4 text-slate-700">Escanear Código QR</h2>
+                            <div id="reader" className="w-full overflow-hidden rounded-lg bg-black min-h-[250px]"></div>
+                            <p className="text-xs text-slate-400 mt-4">Apunte la cámara al código QR del activo.</p>
+                        </div>
+                    ) : (
+                        <div className="mt-8 bg-white p-6 rounded-lg shadow-lg border border-emerald-200 w-full max-w-md animate-fadeIn relative">
+                            <button onClick={()=>{setScannedAsset(null); setDispatchTargetId(null); setSelectedInventoryItem(null);}} className="absolute top-4 right-4 text-slate-400 hover:text-red-500"><X size={20}/></button>
+                            <div className="flex flex-col items-center mb-6">
+                                <div className="bg-emerald-100 p-4 rounded-full mb-3">
+                                    <CheckCircle size={32} className="text-emerald-600"/>
                                 </div>
+                                <h3 className="font-bold text-slate-800 text-lg">Activo Identificado</h3>
+                                <p className="text-xs text-slate-500 font-mono">{scannedAsset.id.substring(0,8)}...</p>
+                            </div>
+                            <div className="space-y-3 text-sm bg-slate-50 p-4 rounded-lg mb-6">
+                                <InfoField label="P/N" value={scannedAsset.metadata.pn} />
+                                <InfoField label="Descripción" value={scannedAsset.metadata.description} />
+                                <InfoField label="Serial" value={scannedAsset.metadata.serial_ge} />
+                                <InfoField label="Estado" value={<StatusBadge status={scannedAsset.current_status}/>} />
+                            </div>
+                            <div className="flex gap-2">
+                                <button onClick={()=>setScannedAsset(null)} className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-lg hover:bg-slate-200 text-sm">Escanear Otro</button>
+                                {scannedAsset.current_status === AssetStatus.RECEIVED_WH && (
+                                    <button 
+                                        onClick={() => {
+                                            setShowDispatchModal(true); 
+                                            setDispatchTargetId(scannedAsset.id); 
+                                            setSelectedInventoryItem(scannedAsset.metadata.pn); 
+                                            setDispatchData(p => ({...p, quantity: 1}));
+                                        }} 
+                                        className="flex-1 py-3 bg-purple-600 text-white font-bold rounded-lg hover:bg-purple-700 shadow-lg shadow-purple-200 text-sm flex items-center justify-center gap-2"
+                                    >
+                                        <LogOut size={16}/> Salida Stock
+                                    </button>
+                                )}
                             </div>
                         </div>
                     )}
@@ -1883,7 +1841,11 @@ export default function App() {
                               </div>
                               <div>
                                   <h3 className="text-xl font-bold text-slate-800">Tarjeta de Salida</h3>
-                                  <p className="text-sm text-slate-500">Stock Actual: <span className="font-bold text-slate-700">{inventoryStats[selectedInventoryItem].stock} unidades</span></p>
+                                  {dispatchTargetId ? (
+                                      <p className="text-xs font-bold text-purple-600 bg-purple-50 px-2 py-1 rounded inline-block mt-1">Activo Único: {dispatchTargetId.substring(0,8)}</p>
+                                  ) : (
+                                      <p className="text-sm text-slate-500">Stock: <span className="font-bold text-slate-700">{inventoryStats[selectedInventoryItem]?.stock} unidades</span></p>
+                                  )}
                               </div>
                           </div>
                           <button onClick={() => setShowDispatchModal(false)} className="text-slate-400 hover:text-red-500 transition-colors"><X size={24}/></button>
@@ -1901,10 +1863,11 @@ export default function App() {
                                   <input 
                                       type="number" 
                                       min="1" 
-                                      max={inventoryStats[selectedInventoryItem].stock}
+                                      max={dispatchTargetId ? 1 : (inventoryStats[selectedInventoryItem]?.stock || 999)}
+                                      disabled={!!dispatchTargetId}
                                       value={dispatchData.quantity}
                                       onChange={(e) => setDispatchData({...dispatchData, quantity: parseInt(e.target.value) || 0})}
-                                      className="w-full border border-slate-300 rounded-lg p-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-100 font-bold text-slate-700"
+                                      className={`w-full border border-slate-300 rounded-lg p-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-100 font-bold text-slate-700 ${dispatchTargetId ? 'bg-slate-100 text-slate-500' : ''}`}
                                   />
                               </div>
                               <div>
