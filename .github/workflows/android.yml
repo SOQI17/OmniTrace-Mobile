@@ -1,0 +1,33 @@
+name: Build APK
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install Node
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      - name: Install Deps
+        run: npm install
+      - name: Install Capacitor
+        run: npm install @capacitor/core @capacitor/cli @capacitor/android
+      - name: Build Web
+        run: npm run build
+      - name: Add Android
+        run: npx cap add android
+      - name: Sync Android
+        run: npx cap sync
+      - name: Setup Java
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+      - name: Build APK
+        run: cd android && chmod +x gradlew && ./gradlew assembleDebug
+      - name: Upload APK
+        uses: actions/upload-artifact@v3
+        with:
+          name: omnitrace-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
