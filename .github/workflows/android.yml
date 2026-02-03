@@ -5,10 +5,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      # 1. Bajar el código (Versión 4)
+      # 1. Bajar tu código
       - uses: actions/checkout@v4
 
-      # 2. Instalar Node.js (Versión 4)
+      # 2. Instalar Node.js
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -22,28 +22,27 @@ jobs:
       - name: Build Web
         run: npm run build
 
-      # 5. Preparar Capacitor
+      # 5. Sincronizar (AQUÍ ESTABA EL ERROR: Quitamos "add android")
       - name: Setup Capacitor
         run: |
           npm install @capacitor/core @capacitor/cli @capacitor/android
-          npx cap add android
           npx cap sync
 
-      # 6. Preparar Java (Versión 4)
+      # 6. Preparar Java
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
           java-version: '17'
 
-      # 7. Fabricar la APK
+      # 7. Fabricar la APK (Damos permisos por si acaso)
       - name: Build APK
         run: |
           cd android
           chmod +x gradlew
           ./gradlew assembleDebug
 
-      # 8. Subir el archivo (Versión 4 - La corrección clave)
+      # 8. Subir el archivo para que lo descargues
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
