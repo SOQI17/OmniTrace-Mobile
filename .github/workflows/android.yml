@@ -19,6 +19,7 @@ jobs:
         run: |
           npm install
           npm install html5-qrcode
+          
 
       # 4. Construir la Web
       - name: Build Web
