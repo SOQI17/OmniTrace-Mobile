@@ -1830,84 +1830,77 @@ export default function App() {
 
            {/* --- MODULO ESCANER CORREGIDO --- */}
 {activeTab === 'SCANNER' && (
-  <div className="flex flex-col items-center justify-center h-full space-y-4 animate-fadeIn">
+  <div className="flex flex-col items-center justify-center h-full space-y-4 animate-fadeIn p-4">
     <div className="bg-white p-6 rounded-2xl shadow-xl text-center max-w-md border border-slate-200 w-full">
       <div className="mb-4">
-        <h2 className="text-xl font-bold text-slate-800">Escáner de Despacho</h2>
-        <p className="text-sm text-slate-500">Escanea el QR para abrir la Tarjeta de Salida.</p>
+        <h2 className="text-xl font-bold text-slate-800">Escáner de Salida</h2>
+        <p className="text-sm text-slate-500">Escanea el código para registrar el despacho.</p>
       </div>
 
       <div className="relative">
-        {/* Contenedor del video */}
         <div 
           id="reader" 
           className="overflow-hidden rounded-xl bg-slate-900 border-2 border-indigo-500 shadow-inner"
           style={{ width: '100%', minHeight: '300px' }}
         ></div>
-        {/* Guía visual de enfoque */}
-        <div className="absolute inset-0 border-[40px] border-black/10 pointer-events-none flex items-center justify-center">
-          <div className="w-48 h-48 border-2 border-white/30 rounded-lg"></div>
+        {/* Guía visual de escaneo */}
+        <div className="absolute inset-0 border-[40px] border-black/20 pointer-events-none flex items-center justify-center">
+          <div className="w-48 h-48 border-2 border-white/40 rounded-lg"></div>
         </div>
       </div>
 
       <button 
+        id="scan-button"
         onClick={async () => {
           try {
-            // Importación dinámica de la librería instalada
             const { Html5Qrcode } = await import('html5-qrcode');
             const scanner = new Html5Qrcode("reader");
             
             const notifySuccess = () => {
               const ctx = new (window.AudioContext || window.webkitAudioContext)();
               const osc = ctx.createOscillator();
-              const gain = ctx.createGain();
-              osc.connect(gain); gain.connect(ctx.destination);
+              osc.connect(ctx.destination);
               osc.frequency.value = 880;
-              gain.gain.setValueAtTime(0, ctx.currentTime);
-              gain.gain.linearRampToValueAtTime(0.2, ctx.currentTime + 0.01);
-              gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.2);
-              osc.start(); osc.stop(ctx.currentTime + 0.2);
+              osc.start(); osc.stop(ctx.currentTime + 0.15);
               if (navigator.vibrate) navigator.vibrate(100);
             };
 
             const onScanSuccess = (decodedText) => {
               notifySuccess();
               scanner.stop().then(() => {
-                // Buscamos el ítem en inventoryStats basado en el QR escaneado
+                // Buscamos el ítem en inventoryStats (la lógica que ya tienes)
                 const itemFound = inventoryStats[decodedText] || 
                                  Object.values(inventoryStats).find(i => 
                                    i.assets.some(a => a.warehouse?.qr_hash === decodedText || a.id === decodedText)
                                  );
 
                 if (itemFound && itemFound.stock > 0) {
-                  // Seteamos el PN y abrimos el modal de la Tarjeta de Salida
                   setSelectedInventoryItem(itemFound.pn);
-                  setShowDispatchModal(true);
+                  setShowDispatchModal(true); // ABRE TU TARJETA DE SALIDA
                 } else {
-                  alert(itemFound ? "Sin stock disponible." : "QR no reconocido: " + decodedText);
+                  alert(itemFound ? "Sin stock disponible." : "Código QR no registrado: " + decodedText);
                 }
-              }).catch(e => console.error("Error al detener el escáner:", e));
+              }).catch(e => console.error("Error al detener:", e));
             };
 
-            const config = { fps: 15, qrbox: { width: 250, height: 250 } };
-            await scanner.start({ facingMode: "environment" }, config, onScanSuccess);
-
+            await scanner.start(
+              { facingMode: "environment" }, 
+              { fps: 15, qrbox: { width: 250, height: 250 } }, 
+              onScanSuccess
+            );
           } catch (err) {
-            // Este es el error que estás viendo en pantalla
-            alert("ERROR DE CÁMARA: Android bloquea la cámara en sitios NO SEGUROS. Para usarlo en el móvil, el sitio debe ser HTTPS (Vercel/Netlify) o usarse en 'localhost'.");
+            alert("ERROR: La cámara requiere una conexión HTTPS o permisos del navegador.");
             console.error(err);
           }
         }}
         className="w-full mt-4 bg-indigo-600 text-white py-4 rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-indigo-700 shadow-lg active:scale-95 transition-all"
       >
-        <ScanLine size={24}/> Activar Cámara
+        <ScanLine size={24}/> Iniciar Cámara
       </button>
     </div>
-    
-    <div className="text-[10px] text-slate-400 font-bold uppercase tracking-widest flex items-center gap-2">
-      <span className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></span>
-      Listo para escanear y despachar
-    </div>
+    <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">
+      OmniTrace - Sistema de Seguridad Activo
+    </p>
   </div>
 )}
         </main>
