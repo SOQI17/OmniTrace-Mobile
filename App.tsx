@@ -1874,7 +1874,7 @@ export default function App() {
                             gain.gain.linearRampToValueAtTime(0.2, ctx.currentTime + 0.01);
                             gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.2);
                             osc.start(); osc.stop(ctx.currentTime + 0.2);
-=======
+
             </div>
 
             <button 
@@ -1928,7 +1928,7 @@ export default function App() {
                             }).catch(e => console.error(e));
                         };
 
-=======
+
                                     setSelectedInventoryItem(itemFound.pn);
                                     setShowDispatchModal(true);
                                 } else {
@@ -1938,7 +1938,7 @@ export default function App() {
                         };
 
                         // Iniciamos la cámara
->>>>>>> ba7405b5d3f76ebc5a194c3541870336971ebec5
+ ba7405b5d3f76ebc5a194c3541870336971ebec5
                         await scanner.start(
                             { facingMode: "environment" }, 
                             { fps: 15, qrbox: { width: 250, height: 250 } }, 
@@ -1954,7 +1954,7 @@ export default function App() {
                     } catch (err) {
                         console.error("Error crítico al iniciar escáner:", err);
                         alert("No se pudo activar la cámara. Revisa si tienes instalada la librería 'html5-qrcode' o si estás en un entorno HTTPS.");
->>>>>>> ba7405b5d3f76ebc5a194c3541870336971ebec5
+ ba7405b5d3f76ebc5a194c3541870336971ebec5
                     }
                 }}
                 className="w-full mt-4 bg-indigo-600 text-white py-4 rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-indigo-700 shadow-lg active:scale-95"
@@ -1968,8 +1968,8 @@ export default function App() {
             <span className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></span>
             Listo para escanear
         </div>
-=======
->>>>>>> ba7405b5d3f76ebc5a194c3541870336971ebec5
+
+ ba7405b5d3f76ebc5a194c3541870336971ebec5
     </div>
 )}
         </main>
