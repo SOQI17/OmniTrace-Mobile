@@ -1835,80 +1835,81 @@ export default function App() {
         <div className="bg-white p-6 rounded-2xl shadow-xl text-center max-w-md border border-slate-200 w-full">
             <div className="mb-4">
                 <h2 className="text-xl font-bold text-slate-800">Escáner de Despacho</h2>
-                <p className="text-sm text-slate-500">Al detectar el QR, se abrirá la Tarjeta de Salida automáticamente.</p>
+                <p className="text-sm text-slate-500">Escanea un QR para abrir la Tarjeta de Salida.</p>
             </div>
 
-            {/* Contenedor de la cámara con marco de enfoque */}
             <div className="relative">
+                {/* Contenedor del video */}
                 <div 
                     id="reader" 
                     className="overflow-hidden rounded-xl bg-slate-900 border-2 border-indigo-500 shadow-inner"
                     style={{ width: '100%', minHeight: '300px' }}
                 ></div>
-                {/* Guía visual de escaneo */}
-                <div className="absolute inset-0 border-[40px] border-black/20 pointer-events-none flex items-center justify-center">
-                    <div className="w-48 h-48 border-2 border-white/50 rounded-lg"></div>
+                {/* Guía visual para el usuario */}
+                <div className="absolute inset-0 border-[40px] border-black/10 pointer-events-none flex items-center justify-center">
+                    <div className="w-48 h-48 border-2 border-white/30 rounded-lg"></div>
                 </div>
             </div>
 
             <button 
-                onClick={() => {
-                    const { Html5Qrcode } = require('html5-qrcode');
-                    const scanner = new Html5Qrcode("reader");
-                    
-                    // Función para el sonido de éxito
-                    const playSuccessSound = () => {
-                        const context = new (window.AudioContext || window.webkitAudioContext)();
-                        const osc = context.createOscillator();
-                        const gain = context.createGain();
-                        osc.type = "sine";
-                        osc.frequency.setValueAtTime(880, context.currentTime); // Nota La5
-                        osc.connect(gain);
-                        gain.connect(context.destination);
-                        gain.gain.setValueAtTime(0, context.currentTime);
-                        gain.gain.linearRampToValueAtTime(0.2, context.currentTime + 0.01);
-                        gain.gain.linearRampToValueAtTime(0, context.currentTime + 0.2);
-                        osc.start();
-                        osc.stop(context.currentTime + 0.2);
+                onClick={async () => {
+                    try {
+                        // Importación dinámica para asegurar que la librería esté cargada
+                        const { Html5Qrcode } = await import('html5-qrcode');
+                        const scanner = new Html5Qrcode("reader");
                         
-                        // Vibración (solo en dispositivos compatibles)
-                        if (navigator.vibrate) navigator.vibrate(100);
-                    };
+                        // Feedback: Sonido y Vibración
+                        const notifySuccess = () => {
+                            const ctx = new (window.AudioContext || window.webkitAudioContext)();
+                            const osc = ctx.createOscillator();
+                            const gain = ctx.createGain();
+                            osc.connect(gain); gain.connect(ctx.destination);
+                            osc.frequency.value = 880;
+                            gain.gain.setValueAtTime(0, ctx.currentTime);
+                            gain.gain.linearRampToValueAtTime(0.2, ctx.currentTime + 0.01);
+                            gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.2);
+                            osc.start(); osc.stop(ctx.currentTime + 0.2);
+                            if (navigator.vibrate) navigator.vibrate(100);
+                        };
 
-                    const onScanSuccess = (decodedText) => {
-                        playSuccessSound(); // Feedback auditivo y táctil
-                        
-                        scanner.stop().then(() => {
-                            // Buscar ítem por PN o por QR Hash en los activos
-                            const itemFound = inventoryStats[decodedText] || 
-                                             Object.values(inventoryStats).find(i => 
-                                                i.assets.some(a => a.warehouse?.qr_hash === decodedText || a.id === decodedText)
-                                             );
+                        const onScanSuccess = (decodedText) => {
+                            notifySuccess();
+                            scanner.stop().then(() => {
+                                // Buscamos el item en tu inventario (inventoryStats ya existe en tu App)
+                                const itemFound = inventoryStats[decodedText] || 
+                                                 Object.values(inventoryStats).find(i => 
+                                                    i.assets.some(a => a.warehouse?.qr_hash === decodedText || a.id === decodedText)
+                                                 );
 
-                            if (itemFound && itemFound.stock > 0) {
-                                setSelectedInventoryItem(itemFound.pn);
-                                setShowDispatchModal(true); // Abre el modal de tu imagen
-                            } else {
-                                showError(itemFound ? "Sin stock disponible." : "Código QR no registrado.");
-                            }
-                        }).catch(err => console.error("Error al detener cámara:", err));
-                    };
+                                if (itemFound && itemFound.stock > 0) {
+                                    // Seteamos el producto y abrimos el modal de tu imagen
+                                    setSelectedInventoryItem(itemFound.pn);
+                                    setShowDispatchModal(true);
+                                } else {
+                                    alert(itemFound ? "Sin stock disponible." : "QR no reconocido: " + decodedText);
+                                }
+                            }).catch(e => console.error(e));
+                        };
 
-                    scanner.start(
-                        { facingMode: "environment" }, 
-                        { fps: 15, qrbox: { width: 250, height: 250 } }, 
-                        onScanSuccess
-                    ).catch(err => showError("Error: Verifica los permisos de cámara en tu navegador."));
+                        await scanner.start(
+                            { facingMode: "environment" }, 
+                            { fps: 15, qrbox: { width: 250, height: 250 } }, 
+                            onScanSuccess
+                        );
+                    } catch (err) {
+                        alert("Error: La cámara requiere HTTPS o permisos del navegador.");
+                        console.error(err);
+                    }
                 }}
-                className="w-full mt-4 bg-indigo-600 text-white py-4 rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-indigo-700 shadow-lg transition-all active:scale-95"
+                className="w-full mt-4 bg-indigo-600 text-white py-4 rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-indigo-700 shadow-lg active:scale-95"
             >
                 <ScanLine size={24}/> Activar Lector QR
             </button>
         </div>
         
-        <div className="flex items-center gap-2 text-slate-400">
-            <CheckCircle size={14} className="text-emerald-500"/>
-            <span className="text-[10px] font-bold uppercase tracking-wider">Modo de alta precisión activo</span>
+        <div className="text-[10px] text-slate-400 font-bold uppercase tracking-widest flex items-center gap-2">
+            <span className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></span>
+            Listo para escanear
         </div>
     </div>
 )}
