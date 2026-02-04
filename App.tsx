@@ -1830,78 +1830,49 @@ export default function App() {
 
            {/* --- MODULO ESCANER CORREGIDO --- */}
 {activeTab === 'SCANNER' && (
-  <div className="flex flex-col items-center justify-center h-full space-y-4 animate-fadeIn p-4">
-    <div className="bg-white p-6 rounded-2xl shadow-xl text-center max-w-md border border-slate-200 w-full">
-      <div className="mb-4">
-        <h2 className="text-xl font-bold text-slate-800">Escáner de Salida</h2>
-        <p className="text-sm text-slate-500">Escanea el código para registrar el despacho.</p>
-      </div>
+    <div className="flex flex-col items-center justify-center h-full space-y-4 p-4 animate-fadeIn">
+        <div className="bg-white p-6 rounded-2xl shadow-xl text-center max-w-md border border-slate-200 w-full">
+            <h2 className="text-xl font-bold text-slate-800">Lector de Bodega</h2>
+            <p className="text-sm text-slate-500 mb-4">Apunta al QR para procesar la salida.</p>
 
-      <div className="relative">
-        <div 
-          id="reader" 
-          className="overflow-hidden rounded-xl bg-slate-900 border-2 border-indigo-500 shadow-inner"
-          style={{ width: '100%', minHeight: '300px' }}
-        ></div>
-        {/* Guía visual de escaneo */}
-        <div className="absolute inset-0 border-[40px] border-black/20 pointer-events-none flex items-center justify-center">
-          <div className="w-48 h-48 border-2 border-white/40 rounded-lg"></div>
+            <div id="reader" className="overflow-hidden rounded-xl bg-slate-900 border-2 border-indigo-500 shadow-inner mb-4" style={{ width: '100%', minHeight: '300px' }}></div>
+
+            <button 
+                onClick={async () => {
+                    try {
+                        const { Html5Qrcode } = await import('html5-qrcode');
+                        const scanner = new Html5Qrcode("reader");
+                        
+                        const onScanSuccess = (decodedText) => {
+                            if (navigator.vibrate) navigator.vibrate(100);
+                            
+                            scanner.stop().then(() => {
+                                // Buscamos el ítem en las estadísticas generadas por la app
+                                const itemFound = inventoryStats[decodedText] || 
+                                                 Object.values(inventoryStats).find(i => 
+                                                    i.assets.some(a => a.warehouse?.qr_hash === decodedText || a.id === decodedText)
+                                                 );
+
+                                if (itemFound && itemFound.stock > 0) {
+                                    setSelectedInventoryItem(itemFound.pn); // Setea el PN para el modal
+                                    setShowDispatchModal(true); // ABRE LA TARJETA DE SALIDA (Imagen compartida)
+                                } else {
+                                    alert("Item no encontrado o sin stock disponible.");
+                                }
+                            });
+                        };
+
+                        await scanner.start({ facingMode: "environment" }, { fps: 15, qrbox: 250 }, onScanSuccess);
+                    } catch (err) {
+                        alert("Error: Asegúrate de estar en HTTPS y otorgar permisos de cámara.");
+                    }
+                }}
+                className="w-full bg-indigo-600 text-white py-4 rounded-xl font-bold shadow-lg active:scale-95"
+            >
+                Iniciar Escáner
+            </button>
         </div>
-      </div>
-
-      <button 
-        id="scan-button"
-        onClick={async () => {
-          try {
-            const { Html5Qrcode } = await import('html5-qrcode');
-            const scanner = new Html5Qrcode("reader");
-            
-            const notifySuccess = () => {
-              const ctx = new (window.AudioContext || window.webkitAudioContext)();
-              const osc = ctx.createOscillator();
-              osc.connect(ctx.destination);
-              osc.frequency.value = 880;
-              osc.start(); osc.stop(ctx.currentTime + 0.15);
-              if (navigator.vibrate) navigator.vibrate(100);
-            };
-
-            const onScanSuccess = (decodedText) => {
-              notifySuccess();
-              scanner.stop().then(() => {
-                // Buscamos el ítem en inventoryStats (la lógica que ya tienes)
-                const itemFound = inventoryStats[decodedText] || 
-                                 Object.values(inventoryStats).find(i => 
-                                   i.assets.some(a => a.warehouse?.qr_hash === decodedText || a.id === decodedText)
-                                 );
-
-                if (itemFound && itemFound.stock > 0) {
-                  setSelectedInventoryItem(itemFound.pn);
-                  setShowDispatchModal(true); // ABRE TU TARJETA DE SALIDA
-                } else {
-                  alert(itemFound ? "Sin stock disponible." : "Código QR no registrado: " + decodedText);
-                }
-              }).catch(e => console.error("Error al detener:", e));
-            };
-
-            await scanner.start(
-              { facingMode: "environment" }, 
-              { fps: 15, qrbox: { width: 250, height: 250 } }, 
-              onScanSuccess
-            );
-          } catch (err) {
-            alert("ERROR: La cámara requiere una conexión HTTPS o permisos del navegador.");
-            console.error(err);
-          }
-        }}
-        className="w-full mt-4 bg-indigo-600 text-white py-4 rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-indigo-700 shadow-lg active:scale-95 transition-all"
-      >
-        <ScanLine size={24}/> Iniciar Cámara
-      </button>
     </div>
-    <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">
-      OmniTrace - Sistema de Seguridad Activo
-    </p>
-  </div>
 )}
         </main>
         
