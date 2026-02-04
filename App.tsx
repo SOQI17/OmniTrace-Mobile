@@ -1830,90 +1830,86 @@ export default function App() {
             )}
 
             {/* SCANNER TAB */}
-            {activeTab === 'SCANNER' && (
-    <div className="flex flex-col items-center justify-center h-full">
+           {activeTab === 'SCANNER' && (
+    <div className="flex flex-col items-center justify-center h-full space-y-4 animate-fadeIn">
         <div className="bg-white p-6 rounded-2xl shadow-xl text-center max-w-md border border-slate-200 w-full">
             <div className="mb-4">
-                <h2 className="text-xl font-bold text-slate-800">Escáner de Activos</h2>
-                <p className="text-sm text-slate-500">Escanee un código QR para ver los detalles.</p>
+                <h2 className="text-xl font-bold text-slate-800">Escáner de Despacho</h2>
+                <p className="text-sm text-slate-500">Al detectar el QR, se abrirá la Tarjeta de Salida automáticamente.</p>
             </div>
 
-            {/* Contenedor visual de la cámara */}
-            <div 
-                id="reader" 
-                className="overflow-hidden rounded-lg bg-slate-100 mb-4"
-                style={{ width: '100%', minHeight: '300px' }}
-            ></div>
+            {/* Contenedor de la cámara con marco de enfoque */}
+            <div className="relative">
+                <div 
+                    id="reader" 
+                    className="overflow-hidden rounded-xl bg-slate-900 border-2 border-indigo-500 shadow-inner"
+                    style={{ width: '100%', minHeight: '300px' }}
+                ></div>
+                {/* Guía visual de escaneo */}
+                <div className="absolute inset-0 border-[40px] border-black/20 pointer-events-none flex items-center justify-center">
+                    <div className="w-48 h-48 border-2 border-white/50 rounded-lg"></div>
+                </div>
+            </div>
 
-            <div className="space-y-3">
-                <button 
-                    onClick={() => {
-                        const { Html5Qrcode } = require('html5-qrcode');
-                        const html5QrCode = new Html5Qrcode("reader");
+            <button 
+                onClick={() => {
+                    const { Html5Qrcode } = require('html5-qrcode');
+                    const scanner = new Html5Qrcode("reader");
+                    
+                    // Función para el sonido de éxito
+                    const playSuccessSound = () => {
+                        const context = new (window.AudioContext || window.webkitAudioContext)();
+                        const osc = context.createOscillator();
+                        const gain = context.createGain();
+                        osc.type = "sine";
+                        osc.frequency.setValueAtTime(880, context.currentTime); // Nota La5
+                        osc.connect(gain);
+                        gain.connect(context.destination);
+                        gain.gain.setValueAtTime(0, context.currentTime);
+                        gain.gain.linearRampToValueAtTime(0.2, context.currentTime + 0.01);
+                        gain.gain.linearRampToValueAtTime(0, context.currentTime + 0.2);
+                        osc.start();
+                        osc.stop(context.currentTime + 0.2);
                         
-                        const qrCodeSuccessCallback = (decodedText) => {
-                            // 1. Detener la cámara inmediatamente después de leer un QR
-                            html5QrCode.stop().then(() => {
-                                // 2. Buscar el activo en el estado local de React
-                                const found = assets.find(a => a.id === decodedText || a.warehouse?.qr_hash === decodedText);
-                                if (found) {
-                                    setScannedAsset(found);
-                                } else {
-                                    showError("Activo no encontrado en la base de datos.");
-                                }
-                            }).catch(err => console.error("Error al detener cámara:", err));
-                        };
+                        // Vibración (solo en dispositivos compatibles)
+                        if (navigator.vibrate) navigator.vibrate(100);
+                    };
 
-                        const config = { 
-                            fps: 10, 
-                            qrbox: { width: 250, height: 250 },
-                            aspectRatio: 1.0 
-                        };
+                    const onScanSuccess = (decodedText) => {
+                        playSuccessSound(); // Feedback auditivo y táctil
+                        
+                        scanner.stop().then(() => {
+                            // Buscar ítem por PN o por QR Hash en los activos
+                            const itemFound = inventoryStats[decodedText] || 
+                                             Object.values(inventoryStats).find(i => 
+                                                i.assets.some(a => a.warehouse?.qr_hash === decodedText || a.id === decodedText)
+                                             );
 
-                        // 3. Iniciar cámara (esto dispara la solicitud de permisos del navegador)
-                        html5QrCode.start({ facingMode: "environment" }, config, qrCodeSuccessCallback)
-                            .catch(err => {
-                                showError("Error de cámara: Asegúrese de dar permisos de acceso.");
-                                console.error(err);
-                            });
-                    }}
-                    className="w-full bg-blue-600 text-white py-3 rounded-lg font-bold flex items-center justify-center gap-2 hover:bg-blue-700 transition-all"
-                >
-                    <ScanLine size={20}/> Activar Cámara
-                </button>
+                            if (itemFound && itemFound.stock > 0) {
+                                setSelectedInventoryItem(itemFound.pn);
+                                setShowDispatchModal(true); // Abre el modal de tu imagen
+                            } else {
+                                showError(itemFound ? "Sin stock disponible." : "Código QR no registrado.");
+                            }
+                        }).catch(err => console.error("Error al detener cámara:", err));
+                    };
 
-                {scannedAsset && (
-                    <button 
-                        onClick={() => {
-                            setScannedAsset(null);
-                            // Pequeño hack para limpiar el contenedor visual
-                            document.getElementById('reader').innerHTML = '';
-                        }}
-                        className="w-full bg-slate-100 text-slate-600 py-2 rounded-lg text-xs font-bold"
-                    >
-                        Limpiar y Reiniciar
-                    </button>
-                )}
-            </div>
+                    scanner.start(
+                        { facingMode: "environment" }, 
+                        { fps: 15, qrbox: { width: 250, height: 250 } }, 
+                        onScanSuccess
+                    ).catch(err => showError("Error: Verifica los permisos de cámara en tu navegador."));
+                }}
+                className="w-full mt-4 bg-indigo-600 text-white py-4 rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-indigo-700 shadow-lg transition-all active:scale-95"
+            >
+                <ScanLine size={24}/> Activar Lector QR
+            </button>
         </div>
-
-        {/* Visualización de resultados del escaneo */}
-        {scannedAsset && (
-            <div className="mt-6 bg-white p-6 rounded-lg shadow-lg border border-emerald-200 w-full max-w-md animate-fadeIn">
-                <div className="flex justify-between items-start mb-4">
-                    <h3 className="font-bold text-emerald-700 flex items-center gap-2"><CheckCircle size={18}/> Activo Identificado</h3>
-                    <button onClick={() => setScannedAsset(null)}><X size={18} className="text-slate-400"/></button>
-                </div>
-                <div className="space-y-1">
-                    <InfoField label="P/N" value={scannedAsset.metadata.pn} />
-                    <InfoField label="Descripción" value={scannedAsset.metadata.description} />
-                    <InfoField label="Estado" value={<StatusBadge status={scannedAsset.current_status}/>} />
-                    <div className="pt-4 flex gap-2">
-                        <AssetLabelPDF asset={scannedAsset} />
-                    </div>
-                </div>
-            </div>
-        )}
+        
+        <div className="flex items-center gap-2 text-slate-400">
+            <CheckCircle size={14} className="text-emerald-500"/>
+            <span className="text-[10px] font-bold uppercase tracking-wider">Modo de alta precisión activo</span>
+        </div>
     </div>
 )}
         </main>
