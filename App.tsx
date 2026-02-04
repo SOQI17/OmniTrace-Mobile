@@ -1835,7 +1835,11 @@ export default function App() {
         <div className="bg-white p-6 rounded-2xl shadow-xl text-center max-w-md border border-slate-200 w-full">
             <div className="mb-4">
                 <h2 className="text-xl font-bold text-slate-800">Escáner de Despacho</h2>
+<<<<<<< HEAD
                 <p className="text-sm text-slate-500">Escanea un QR para abrir la Tarjeta de Salida.</p>
+=======
+                <p className="text-sm text-slate-500">Haz clic para activar la cámara y escanear el QR.</p>
+>>>>>>> ba7405b5d3f76ebc5a194c3541870336971ebec5
             </div>
 
             <div className="relative">
@@ -1845,6 +1849,7 @@ export default function App() {
                     className="overflow-hidden rounded-xl bg-slate-900 border-2 border-indigo-500 shadow-inner"
                     style={{ width: '100%', minHeight: '300px' }}
                 ></div>
+<<<<<<< HEAD
                 {/* Guía visual para el usuario */}
                 <div className="absolute inset-0 border-[40px] border-black/10 pointer-events-none flex items-center justify-center">
                     <div className="w-48 h-48 border-2 border-white/30 rounded-lg"></div>
@@ -1869,19 +1874,51 @@ export default function App() {
                             gain.gain.linearRampToValueAtTime(0.2, ctx.currentTime + 0.01);
                             gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.2);
                             osc.start(); osc.stop(ctx.currentTime + 0.2);
+=======
+            </div>
+
+            <button 
+                id="btn-scan"
+                onClick={async () => {
+                    try {
+                        // Forzamos la carga de la librería desde el scope global o import
+                        const { Html5Qrcode } = await import('html5-qrcode');
+                        const scanner = new Html5Qrcode("reader");
+                        
+                        const playSuccessSound = () => {
+                            const context = new (window.AudioContext || window.webkitAudioContext)();
+                            const osc = context.createOscillator();
+                            const gain = context.createGain();
+                            osc.type = "sine";
+                            osc.frequency.setValueAtTime(880, context.currentTime);
+                            osc.connect(gain);
+                            gain.connect(context.destination);
+                            gain.gain.setValueAtTime(0, context.currentTime);
+                            gain.gain.linearRampToValueAtTime(0.2, context.currentTime + 0.01);
+                            gain.gain.linearRampToValueAtTime(0, context.currentTime + 0.2);
+                            osc.start();
+                            osc.stop(context.currentTime + 0.2);
+>>>>>>> ba7405b5d3f76ebc5a194c3541870336971ebec5
                             if (navigator.vibrate) navigator.vibrate(100);
                         };
 
                         const onScanSuccess = (decodedText) => {
+<<<<<<< HEAD
                             notifySuccess();
                             scanner.stop().then(() => {
                                 // Buscamos el item en tu inventario (inventoryStats ya existe en tu App)
+=======
+                            playSuccessSound();
+                            scanner.stop().then(() => {
+                                // Buscamos el item en las estadísticas que ya tienes en el código
+>>>>>>> ba7405b5d3f76ebc5a194c3541870336971ebec5
                                 const itemFound = inventoryStats[decodedText] || 
                                                  Object.values(inventoryStats).find(i => 
                                                     i.assets.some(a => a.warehouse?.qr_hash === decodedText || a.id === decodedText)
                                                  );
 
                                 if (itemFound && itemFound.stock > 0) {
+<<<<<<< HEAD
                                     // Seteamos el producto y abrimos el modal de tu imagen
                                     setSelectedInventoryItem(itemFound.pn);
                                     setShowDispatchModal(true);
@@ -1891,26 +1928,48 @@ export default function App() {
                             }).catch(e => console.error(e));
                         };
 
+=======
+                                    setSelectedInventoryItem(itemFound.pn);
+                                    setShowDispatchModal(true);
+                                } else {
+                                    alert(itemFound ? "Sin stock disponible." : "Código QR no registrado: " + decodedText);
+                                }
+                            }).catch(err => console.error("Error al detener:", err));
+                        };
+
+                        // Iniciamos la cámara
+>>>>>>> ba7405b5d3f76ebc5a194c3541870336971ebec5
                         await scanner.start(
                             { facingMode: "environment" }, 
                             { fps: 15, qrbox: { width: 250, height: 250 } }, 
                             onScanSuccess
                         );
+<<<<<<< HEAD
                     } catch (err) {
                         alert("Error: La cámara requiere HTTPS o permisos del navegador.");
                         console.error(err);
+=======
+                        
+                        console.log("Escáner iniciado correctamente");
+                    } catch (err) {
+                        console.error("Error crítico al iniciar escáner:", err);
+                        alert("No se pudo activar la cámara. Revisa si tienes instalada la librería 'html5-qrcode' o si estás en un entorno HTTPS.");
+>>>>>>> ba7405b5d3f76ebc5a194c3541870336971ebec5
                     }
                 }}
                 className="w-full mt-4 bg-indigo-600 text-white py-4 rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-indigo-700 shadow-lg active:scale-95"
             >
-                <ScanLine size={24}/> Activar Lector QR
+                <ScanLine size={24}/> Activar Cámara ahora
             </button>
         </div>
+<<<<<<< HEAD
         
         <div className="text-[10px] text-slate-400 font-bold uppercase tracking-widest flex items-center gap-2">
             <span className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></span>
             Listo para escanear
         </div>
+=======
+>>>>>>> ba7405b5d3f76ebc5a194c3541870336971ebec5
     </div>
 )}
         </main>
